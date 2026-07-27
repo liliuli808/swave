@@ -10,7 +10,7 @@ Build a standalone Python project that:
 4. produces a deterministic, resumable, one-million-sample training dataset; and
 5. trains and serves a shared-backbone, four-head neural surrogate for forward prediction.
 
-The delivered runtime must not invoke, compile, link, or shell out to the `mode-kissing` or `QEDispInv` C++ executables. NumPy, SciPy, HDF5, Matplotlib, and PyTorch binary wheels are allowed; a C++ compiler is not a runtime prerequisite.
+The delivered runtime must not invoke, compile, link, or shell out to the `mode-kissing` or `QEDispInv` C++ executables. NumPy, SciPy, Numba, HDF5, Matplotlib, and PyTorch binary wheels are allowed; a C++ compiler is not a runtime prerequisite. Numba uses its bundled LLVM toolchain to cache-compile the scalar secular-function hot path on first use while retaining a pure-Python reference backend for parity tests.
 
 Inversion is outside this project because the supplied requirements state that inversion code already exists. The surrogate will expose stable NumPy and PyTorch inference interfaces that an external inversion program can call.
 
@@ -93,7 +93,7 @@ Each module has one primary responsibility:
 - `config.py`: validated immutable configuration objects and TOML loading.
 - `empirical.py`: vectorized `Vs -> Vp, density` conversions.
 - `geology.py`: reproducible normal and anomalous 20-value `Vs` generation.
-- `secular.py`: Python implementation of the unnormalized Dunkin delta-matrix secular function.
+- `secular.py`: Python implementation of the unnormalized Dunkin delta-matrix secular function with a Numba-compiled runtime hot path and a reference backend.
 - `sampling.py`: phase-velocity sample selection, degraded-model supplementation, and quadratic-extrema supplementation.
 - `solver.py`: bracket detection, TOMS 748 refinement, modal ordering, and recovery retries.
 - `quality.py`: model and curve validation with machine-readable failure codes.
@@ -393,4 +393,3 @@ The million-sample production command is not required to finish during the short
 - Variable layer counts or trainable layer thicknesses.
 - A web interface.
 - Silently smoothing or interpolating physics outputs to make curves appear complete.
-

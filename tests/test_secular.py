@@ -45,3 +45,13 @@ def test_invalid_frequency_and_velocity_are_rejected() -> None:
     with pytest.raises(ValueError, match="phase_velocity"):
         secular.evaluate(10.0, -0.3)
 
+
+def test_numba_backend_matches_python_reference_path() -> None:
+    """Catches JIT acceleration changing the physical determinant or its sign."""
+    model = _paper_model()
+    reference = RayleighSecular(model, backend="python")
+    accelerated = RayleighSecular(model, backend="numba")
+    for frequency, velocity in ((0.5, 0.17), (19.7, 0.267), (60.0, 0.55)):
+        assert accelerated.evaluate(frequency, velocity) == pytest.approx(
+            reference.evaluate(frequency, velocity), rel=1e-11, abs=1e-12
+        )

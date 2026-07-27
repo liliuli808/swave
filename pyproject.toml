@@ -9,7 +9,8 @@ description = "Pure-Python Rayleigh-wave forward modeling and neural surrogate"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "numpy>=2.0",
+  "numpy>=2.0,<2.5",
+  "numba>=0.66",
   "scipy>=1.14",
   "h5py>=3.11",
   "matplotlib>=3.9",
@@ -32,4 +33,3 @@ addopts = "-ra"
 [tool.ruff]
 line-length = 88
 target-version = "py311"
-

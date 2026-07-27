@@ -1,6 +1,8 @@
 import numpy as np
+import pytest
 
-from swave.config import PhysicsConfig
+from swave.config import DatasetConfig, PhysicsConfig
+from swave.geology import generate_model
 from swave.secular import LayeredModel
 from swave.solver import DispersionSolver, deduplicate_roots
 
@@ -48,3 +50,22 @@ def test_grid_has_fixed_four_by_frequency_shape_and_matching_mask() -> None:
     assert result.status.shape == (3,)
     assert np.array_equal(result.valid_mask, np.isfinite(result.phase_velocity))
 
+
+def test_quadratic_search_stops_after_biased_coarse_root_budget() -> None:
+    """Catches scanning/refining the entire high-frequency velocity range."""
+    config = DatasetConfig()
+    generated = generate_model(0, config.geology, config.seed)
+    model = LayeredModel.from_vs(
+        generated.vs,
+        config.geology.empirical_method,
+        config.geology.thickness_km,
+    )
+    solution = DispersionSolver(model, config.physics).solve_frequency(60.0)
+    np.testing.assert_allclose(
+        solution.roots,
+        [0.61526340, 0.65003814, 0.65311292, 0.65826456],
+        rtol=1e-7,
+        atol=1e-8,
+    )
+    assert solution.evaluations < 1_000
+    assert solution.status == pytest.approx(0)

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
+from numba import njit
 from numpy.typing import ArrayLike, NDArray
 
 from .empirical import EmpiricalMethod, material_properties
@@ -232,11 +234,94 @@ def _dunkin_matrix(
     return matrix
 
 
+_layer_variables_jit = njit(cache=True)(_layer_variables)
+_dunkin_matrix_jit = njit(cache=True)(_dunkin_matrix)
+
+
+@njit(cache=True)
+def _evaluate_numba(
+    density_values: NDArray[np.float64],
+    vs_values: NDArray[np.float64],
+    vp_values: NDArray[np.float64],
+    thickness_values: NDArray[np.float64],
+    frequency: float,
+    phase_velocity: float,
+) -> float:
+    layers = len(vs_values)
+    omega = 2.0 * np.pi * frequency
+    wavenumber = omega / phase_velocity
+    wavenumber2 = wavenumber * wavenumber
+
+    xka = omega / vp_values[-1]
+    xkb = omega / vs_values[-1]
+    ra = np.sqrt((wavenumber + xka) * abs(wavenumber - xka))
+    rb = np.sqrt((wavenumber + xkb) * abs(wavenumber - xkb))
+    t = vs_values[-1] / omega
+    gammk = 2.0 * t * t
+    gam = gammk * wavenumber2
+    gamm1 = gam - 1.0
+    density = density_values[-1]
+    state = np.array(
+        [
+            density**2 * (gamm1**2 - gam * gammk * ra * rb),
+            -density * ra,
+            density * (gamm1 - gammk * ra * rb),
+            density * rb,
+            wavenumber2 - ra * rb,
+        ],
+        dtype=np.float64,
+    )
+
+    for layer in range(layers - 2, -1, -1):
+        xka = omega / vp_values[layer]
+        xkb = omega / vs_values[layer]
+        t = vs_values[layer] / omega
+        gammk = 2.0 * t * t
+        gam = gammk * wavenumber2
+        ra = np.sqrt((wavenumber + xka) * abs(wavenumber - xka))
+        rb = np.sqrt((wavenumber + xkb) * abs(wavenumber - xkb))
+        thickness = thickness_values[layer]
+        variables = _layer_variables_jit(
+            ra * thickness,
+            rb * thickness,
+            ra,
+            rb,
+            wavenumber,
+            xka,
+            xkb,
+            thickness,
+        )
+        matrix = _dunkin_matrix_jit(
+            wavenumber2,
+            gam,
+            gammk,
+            density_values[layer],
+            variables[2],
+            variables[3],
+            variables[4],
+            variables[5],
+            variables[6],
+            variables[7],
+            variables[8],
+            variables[9],
+            variables[10],
+            variables[11],
+        )
+        state = matrix.T @ state
+    return float(state[0])
+
+
 class RayleighSecular:
     """Evaluate the unnormalized Rayleigh-wave dispersion determinant."""
 
-    def __init__(self, model: LayeredModel) -> None:
+    def __init__(
+        self, model: LayeredModel, backend: Literal["numba", "python"] = "numba"
+    ) -> None:
+        if backend not in {"numba", "python"}:
+            raise ValueError("backend must be numba or python")
         self.model = model
+        self.backend = backend
+        self._thickness = model.thickness
 
     def evaluate(self, frequency: float, phase_velocity: float) -> float:
         if not np.isfinite(frequency) or frequency <= 0:
@@ -246,7 +331,19 @@ class RayleighSecular:
 
         try:
             with np.errstate(over="raise", invalid="raise", divide="raise"):
-                value = self._evaluate(float(frequency), float(phase_velocity))
+                if self.backend == "numba":
+                    value = _evaluate_numba(
+                        self.model.density,
+                        self.model.vs,
+                        self.model.vp,
+                        self._thickness,
+                        float(frequency),
+                        float(phase_velocity),
+                    )
+                else:
+                    value = self._evaluate(
+                        float(frequency), float(phase_velocity)
+                    )
         except (FloatingPointError, OverflowError, ZeroDivisionError) as error:
             raise SecularNumericalError(frequency, phase_velocity) from error
         if not np.isfinite(value):
@@ -287,7 +384,7 @@ class RayleighSecular:
             gam = gammk * wavenumber2
             ra = np.sqrt((wavenumber + xka) * abs(wavenumber - xka))
             rb = np.sqrt((wavenumber + xkb) * abs(wavenumber - xkb))
-            thickness = model.thickness[layer]
+            thickness = self._thickness[layer]
             variables = _layer_variables(
                 ra * thickness,
                 rb * thickness,
@@ -307,4 +404,3 @@ class RayleighSecular:
             )
             state = matrix.T @ state
         return float(state[0])
-

@@ -4,9 +4,9 @@
 
 **Goal:** Deliver a standalone Python package that generates one million deterministic 20-parameter geological models, calculates Rayleigh modes 0–3 with mode-kissing recovery, and trains/serves a four-head neural surrogate.
 
-**Architecture:** A `src/swave` package separates empirical material laws, geological sampling, secular-function physics, adaptive root search, curve quality control, HDF5 sharding, and PyTorch training. The physics solver is NumPy/SciPy-only at runtime; dataset workers write independent atomic shards; the neural model consumes 20 `Vs` values and emits four 120-frequency curves.
+**Architecture:** A `src/swave` package separates empirical material laws, geological sampling, secular-function physics, adaptive root search, curve quality control, HDF5 sharding, and PyTorch training. The physics solver is Python-native and uses a Numba-compiled hot path without requiring a C++ compiler or external executable; dataset workers write independent atomic shards; the neural model consumes 20 `Vs` values and emits four 120-frequency curves.
 
-**Tech Stack:** Python 3.11+, NumPy, SciPy, h5py, Matplotlib, PyTorch, pytest, Ruff, TOML via Python `tomllib`.
+**Tech Stack:** Python 3.11+, NumPy, Numba, SciPy, h5py, Matplotlib, PyTorch, pytest, Ruff, TOML via Python `tomllib`.
 
 ## Global Constraints
 

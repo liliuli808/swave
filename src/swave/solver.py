@@ -19,6 +19,7 @@ from .sampling import (
 from .secular import LayeredModel, RayleighSecular, SecularNumericalError
 
 RootStrategy = Literal["raw", "degraded", "quadratic"]
+_QUADRATIC_ROOT_BIAS = 2
 
 
 @dataclass(frozen=True)
@@ -86,48 +87,84 @@ class DispersionSolver:
         samples: NDArray[np.float64],
         known_values: dict[float, float] | None = None,
     ) -> NDArray[np.float64]:
-        values = np.array(
-            [
-                (
-                    known_values[float(sample)]
-                    if known_values is not None
-                    and float(sample) in known_values
-                    else evaluator(float(sample))
-                )
-                for sample in samples
-            ],
-            dtype=np.float64,
-        )
         roots: list[float] = []
+        if samples.size < 2:
+            return np.asarray(roots, dtype=np.float64)
+        left = float(samples[0])
+        left_value = (
+            known_values[left]
+            if known_values is not None and left in known_values
+            else evaluator(left)
+        )
         for index in range(samples.size - 1):
-            left = float(samples[index])
             right = float(samples[index + 1])
-            left_value = values[index]
-            right_value = values[index + 1]
+            right_value = (
+                known_values[right]
+                if known_values is not None and right in known_values
+                else evaluator(right)
+            )
             if not np.isfinite(left_value) or not np.isfinite(right_value):
+                if np.isfinite(right_value):
+                    left = right
+                    left_value = right_value
                 continue
             if left_value == 0.0:
                 roots.append(left)
             if right_value == 0.0:
                 roots.append(right)
-            if left_value * right_value >= 0:
-                continue
-            try:
-                root = toms748(
-                    evaluator,
-                    left,
-                    right,
-                    xtol=self.config.root_tolerance,
-                    rtol=4.0 * np.finfo(float).eps,
-                    maxiter=100,
-                )
-            except (ValueError, RuntimeError, SecularNumericalError):
-                evaluator.failed = True
-                continue
-            if np.isfinite(root):
-                roots.append(float(root))
-        distinct = deduplicate_roots(roots, self.config.dedup_tolerance)
-        return distinct[: self.config.mode_count]
+            if left_value * right_value < 0:
+                try:
+                    root = toms748(
+                        evaluator,
+                        left,
+                        right,
+                        xtol=self.config.root_tolerance,
+                        rtol=4.0 * np.finfo(float).eps,
+                        maxiter=100,
+                    )
+                except (ValueError, RuntimeError, SecularNumericalError):
+                    evaluator.failed = True
+                else:
+                    if np.isfinite(root):
+                        roots.append(float(root))
+            roots = deduplicate_roots(
+                roots, self.config.dedup_tolerance
+            ).tolist()
+            if len(roots) >= self.config.mode_count:
+                break
+            left = right
+            left_value = right_value
+        return np.asarray(roots[: self.config.mode_count], dtype=np.float64)
+
+    @staticmethod
+    def _coarse_prefix(
+        evaluator: _Evaluations,
+        samples: NDArray[np.float64],
+        required_crossings: int,
+    ) -> tuple[NDArray[np.float64], dict[float, float]]:
+        """Evaluate only through a small root-biased prefix, as QEDispInv does."""
+        if samples.size == 0:
+            return samples, {}
+        known = {float(samples[0]): evaluator(float(samples[0]))}
+        previous_value = known[float(samples[0])]
+        crossings = 0
+        stop = samples.size
+        for index in range(1, samples.size):
+            current = float(samples[index])
+            current_value = evaluator(current)
+            known[current] = current_value
+            if (
+                np.isfinite(previous_value)
+                and np.isfinite(current_value)
+                and previous_value * current_value < 0
+            ):
+                crossings += 1
+                if crossings >= required_crossings:
+                    stop = index + 1
+                    break
+            if np.isfinite(current_value):
+                previous_value = current_value
+        return samples[:stop], known
 
     def _solve_model(
         self,
@@ -149,6 +186,11 @@ class DispersionSolver:
             )
         known_values: dict[float, float] | None = None
         if strategy == "quadratic":
+            samples, known_values = self._coarse_prefix(
+                evaluator,
+                samples,
+                self.config.mode_count + _QUADRATIC_ROOT_BIAS,
+            )
             samples, known_values = augment_quadratic_samples(
                 samples,
                 evaluator,
@@ -235,4 +277,3 @@ class DispersionSolver:
             status=status,
             evaluations=evaluations,
         )
-
