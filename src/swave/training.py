@@ -17,7 +17,7 @@ from numpy.typing import NDArray
 from torch.utils.data import DataLoader, Dataset
 
 from .config import TrainingConfig
-from .dataset import load_manifest
+from .dataset import validate_dataset_files
 from .inference import ForwardPredictor, resolve_device
 from .network import FourHeadForwardModel, masked_smooth_l1
 
@@ -235,17 +235,35 @@ def _save_history(path: Path, history: dict[str, list[dict[str, float | int]]]) 
     temporary.replace(path)
 
 
+def _validate_resume_config(
+    saved: dict[str, object], current: TrainingConfig
+) -> None:
+    """Allow execution-location changes but reject optimization changes."""
+    allowed_differences = {"device", "num_workers", "resume"}
+    current_values = current.to_dict()
+    incompatible = [
+        key
+        for key in sorted(set(saved) | set(current_values))
+        if key not in allowed_differences and saved.get(key) != current_values.get(key)
+    ]
+    if incompatible:
+        raise ValueError(
+            "checkpoint training configuration does not match: "
+            + ", ".join(incompatible)
+        )
+
+
 def train(config: TrainingConfig) -> Path:
     """Train or resume the four-head model and return the best checkpoint."""
     random.seed(config.seed)
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
     device = resolve_device(config.device)
+    manifest = validate_dataset_files(config.dataset_dir)
     training = HDF5ShardDataset(config.dataset_dir, "train")
     validation = HDF5ShardDataset(config.dataset_dir, "validation")
     if not training or not validation:
         raise ValueError("dataset must contain nonempty train and validation splits")
-    manifest = load_manifest(config.dataset_dir / "manifest.json")
     config.output_dir.mkdir(parents=True, exist_ok=True)
     last_path = config.output_dir / "last.pt"
     best_path = config.output_dir / "best.pt"
@@ -267,6 +285,7 @@ def train(config: TrainingConfig) -> Path:
         payload = torch.load(last_path, map_location=device, weights_only=False)
         if payload["dataset_config_hash"] != manifest.config_hash:
             raise ValueError("checkpoint dataset configuration hash does not match")
+        _validate_resume_config(payload["training_config"], config)
         model.load_state_dict(payload["model"])
         optimizer.load_state_dict(payload["optimizer"])
         scheduler.load_state_dict(payload["scheduler"])
@@ -367,8 +386,15 @@ def evaluate(
     device: str = "auto",
 ) -> dict[str, dict[str, float | int]]:
     """Evaluate a checkpoint on the deterministic test split in physical units."""
+    dataset_path = Path(dataset_dir)
+    manifest = validate_dataset_files(dataset_path)
+    payload = torch.load(
+        Path(checkpoint), map_location="cpu", weights_only=False
+    )
+    if payload.get("dataset_config_hash") != manifest.config_hash:
+        raise ValueError("checkpoint dataset configuration hash does not match")
     predictor = ForwardPredictor.load(checkpoint, device=device)
-    dataset = HDF5ShardDataset(dataset_dir, "test")
+    dataset = HDF5ShardDataset(dataset_path, "test")
     if not dataset:
         raise ValueError("test split is empty")
     loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=0)

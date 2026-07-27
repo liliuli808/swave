@@ -1,0 +1,3 @@
+include configs/*.toml
+include tools/generate_reference_fixture.py
+recursive-include tests/fixtures *.npz *.txt

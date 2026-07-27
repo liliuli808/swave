@@ -73,8 +73,11 @@ Each `shard-NNNNN.h5` contains:
 
 Files are gzip-compressed, written to process-specific temporary paths, and
 atomically renamed only after a complete close. `manifest.json` records the
-configuration hash, completed shards, family counts, rejected attempts, and
-recovery count.
+configuration hash, package version, creation time, completed shards, per-shard
+SHA-256 digests, accepted/rejected family counts, rejection reasons, and
+recovery count. Resume verifies every required dataset, shape, dtype, sample-ID
+digest, material-property invariant, curve mask, and file checksum before a
+shard is accepted as complete.
 
 ## Train and evaluate
 
@@ -88,6 +91,7 @@ swave train \
   --dataset-dir data/production \
   --output-dir runs/smoke \
   --epochs 1 \
+  --num-workers 0 \
   --device cpu
 ```
 
@@ -100,7 +104,9 @@ swave train --config configs/training.toml
 Training streams HDF5 rows, computes normalization from valid training cells
 only, balances the masked Smooth-L1 loss across nonempty modes, and writes
 `last.pt`, `best.pt`, and `history.json`. Repeating the command resumes
-`last.pt` when `resume = true`.
+`last.pt` when `resume = true`. Training and evaluation first require the exact
+completed shard set and recheck every manifest SHA-256; evaluation also requires
+the checkpoint dataset hash to match.
 
 ```bash
 swave evaluate \
@@ -163,6 +169,34 @@ matching the reference algorithm’s bounded search. Valid leading gaps in highe
 modes remain masked. Internal gaps or numerical failures receive one bounded
 refinement pass and then cause deterministic model regeneration; the code never
 silently fills missing physical targets with zeros or interpolation.
+
+## Measured production estimate
+
+The following CPU benchmark was recorded on 2026-07-27 with the same production
+physics and geology configuration. A complete 100-model shard ran in one worker;
+the separate evaluation-count sample used the first 10 deterministic models.
+Projections assume ideal linear shard-level scaling and therefore are planning
+estimates, not completion guarantees.
+
+| Measurement | Result |
+| --- | ---: |
+| Accepted models | 100/100 |
+| Wall time | about 210 s |
+| Throughput | 0.476 models/s |
+| Mean secular evaluations/model (10-model sample) | 13,057 |
+| Recovery/retry rate | 0% / 0% |
+| Compressed shard bytes/model | 1,359 bytes |
+| Projected 1,000,000-model time, 1 worker | 24.3 days |
+| Projected time, 4 workers | 6.1 days |
+| Projected time, 100 concurrent shards | 5.8 hours |
+| Projected compressed storage | 1.36 GB |
+
+The detected host reports 192 logical CPUs, so `workers = 0` resolves to 191
+processes, but the 100 production shards limit useful concurrency to 100. Real
+throughput will normally be lower because of CPU contention, memory bandwidth,
+JIT startup, difficult models, retries, and filesystem load. Run a representative
+shard on the target host and set `--workers` explicitly before committing to the
+full production job.
 
 ## Reproduce checks
 

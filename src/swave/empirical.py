@@ -92,4 +92,3 @@ def material_properties(
         f"unknown empirical method {method!r}; expected "
         "brocher05, gardner, near_surface"
     )
-

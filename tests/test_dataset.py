@@ -23,6 +23,10 @@ def test_smoke_dataset_has_declared_schema(tmp_path: Path) -> None:
     config = _smoke_config(tmp_path, samples=4)
     manifest = generate_dataset(config)
     assert manifest.complete
+    assert manifest.package_version == "0.1.0"
+    assert manifest.created_at
+    assert manifest.rejected_by_kind == {}
+    assert set(manifest.shard_sha256) == {"0", "1"}
     assert load_manifest(tmp_path / "manifest.json") == manifest
     files = sorted(tmp_path.glob("shard-*.h5"))
     assert len(files) == 2
@@ -54,3 +58,13 @@ def test_conflicting_configuration_is_rejected(tmp_path: Path) -> None:
     second = replace(first, seed=first.seed + 1)
     with pytest.raises(ValueError, match="configuration hash"):
         generate_dataset(second)
+
+
+def test_resume_rejects_a_shard_with_corrupt_sample_ids(tmp_path: Path) -> None:
+    config = _smoke_config(tmp_path)
+    generate_dataset(config)
+    shard = next(tmp_path.glob("shard-*.h5"))
+    with h5py.File(shard, "r+") as handle:
+        handle["sample_id"][0] = 999
+    with pytest.raises(ValueError, match="checksum|sample_id"):
+        generate_dataset(config)

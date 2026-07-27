@@ -64,6 +64,7 @@ def _train(arguments: argparse.Namespace) -> int:
             ),
             "device": arguments.device,
             "epochs": arguments.epochs,
+            "num_workers": arguments.num_workers,
         }.items()
         if value is not None
     }
@@ -177,6 +178,7 @@ def _build_parser() -> argparse.ArgumentParser:
     training.add_argument("--dataset-dir")
     training.add_argument("--output-dir")
     training.add_argument("--epochs", type=int)
+    training.add_argument("--num-workers", type=int)
     training.add_argument(
         "--device", choices=("auto", "cpu", "cuda", "mps")
     )

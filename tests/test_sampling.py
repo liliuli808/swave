@@ -52,4 +52,3 @@ def test_mode_count_estimate_increases_with_frequency() -> None:
     high = estimate_mode_count(model, 30.0, 0.55)
     assert low > 0
     assert high == pytest.approx(3 * low)
-

@@ -76,14 +76,20 @@ def assess_arrays(
         flags |= QualityFlag.NONFINITE_VALID
         failing.update(np.flatnonzero(np.any(bad_valid, axis=0)).tolist())
 
-    for row in mask:
+    for mode, row in enumerate(mask):
         present = np.flatnonzero(row)
-        if present.size < 2:
+        if not present.size:
+            if mode == 0:
+                flags |= QualityFlag.INTERNAL_GAP
+                failing.update(range(values.shape[1]))
             continue
-        internal = np.flatnonzero(~row[present[0] : present[-1] + 1]) + present[0]
-        if internal.size:
+        branch_start = 0 if mode == 0 else int(present[0])
+        missing_branch = (
+            np.flatnonzero(~row[branch_start:]) + branch_start
+        )
+        if missing_branch.size:
             flags |= QualityFlag.INTERNAL_GAP
-            failing.update(internal.tolist())
+            failing.update(missing_branch.tolist())
 
     for column in range(values.shape[1]):
         roots = values[mask[:, column], column]
@@ -157,4 +163,3 @@ def solve_with_recovery(
             report.failing_frequency_indices,
         )
     return RecoveryResult(result, report, recovered)
-

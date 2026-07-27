@@ -235,4 +235,3 @@ def add_root_samples(
         )
     merged = _unique_sorted(np.concatenate([base, np.asarray(additions)]))
     return merged[(merged > 0) & (merged < upper_bound)]
-

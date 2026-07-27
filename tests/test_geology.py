@@ -79,4 +79,3 @@ def test_family_draws_follow_configured_mixture() -> None:
     }
     for kind, fraction in expected.items():
         assert abs(counts[kind] / 4000 - fraction) < 0.03
-

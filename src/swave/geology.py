@@ -163,4 +163,3 @@ def generate_model(
     raise RuntimeError(
         f"unable to generate valid {kind.name} model for sample {sample_id}"
     )
-

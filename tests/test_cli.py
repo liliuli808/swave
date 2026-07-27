@@ -53,6 +53,11 @@ def test_plot_model_creates_nonempty_png(tmp_path: Path) -> None:
     assert output.stat().st_size > 1_000
 
 
+def test_train_help_exposes_data_loader_worker_override(capsys) -> None:
+    assert main(["train", "--help"]) == 0
+    assert "--num-workers" in capsys.readouterr().out
+
+
 def test_invalid_predict_input_returns_clean_error(
     tmp_path: Path, capsys
 ) -> None:

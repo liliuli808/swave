@@ -26,6 +26,28 @@ def test_internal_missing_cell_requests_recovery() -> None:
     assert report.failing_frequency_indices == (4,)
 
 
+def test_missing_fundamental_at_low_frequency_requests_recovery() -> None:
+    """Catches treating a missing fundamental root as higher-mode onset."""
+    values = np.repeat(np.array([[0.2], [0.3], [0.4], [0.5]]), 8, axis=1)
+    mask = np.ones((4, 8), dtype=bool)
+    mask[0, :2] = False
+    values[~mask] = np.nan
+    report = assess_arrays(values, mask)
+    assert report.flags & QualityFlag.INTERNAL_GAP
+    assert report.failing_frequency_indices == (0, 1)
+
+
+def test_trailing_missing_higher_mode_requests_recovery() -> None:
+    """Catches accepting a branch that disappears after its physical onset."""
+    values = np.repeat(np.array([[0.2], [0.3], [0.4], [0.5]]), 8, axis=1)
+    mask = np.ones((4, 8), dtype=bool)
+    mask[2, -2:] = False
+    values[~mask] = np.nan
+    report = assess_arrays(values, mask)
+    assert report.flags & QualityFlag.INTERNAL_GAP
+    assert report.failing_frequency_indices == (6, 7)
+
+
 def test_nonfinite_valid_value_is_hard_failure() -> None:
     """Catches a NaN target being admitted to HDF5 with a true mask."""
     values = np.repeat(np.array([[0.2], [0.3], [0.4], [0.5]]), 8, axis=1)

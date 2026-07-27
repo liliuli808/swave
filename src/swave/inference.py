@@ -105,4 +105,3 @@ class ForwardPredictor:
     ) -> tuple[NDArray[np.float64], NDArray[np.float32]]:
         frequencies = np.arange(0.5, 60.0 + 0.25, 0.5, dtype=np.float64)
         return frequencies, self.predict(vs)
-

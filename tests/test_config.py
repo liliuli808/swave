@@ -43,4 +43,3 @@ def test_loads_production_config() -> None:
     assert cfg.samples == 1_000_000
     assert cfg.physics.mode_count == 4
     assert cfg.geology.layers == 20
-
