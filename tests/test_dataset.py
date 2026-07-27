@@ -1,0 +1,56 @@
+from dataclasses import replace
+from pathlib import Path
+
+import h5py
+import numpy as np
+import pytest
+
+from swave.config import DatasetConfig
+from swave.dataset import generate_dataset, load_manifest
+
+
+def _smoke_config(output_dir: Path, samples: int = 2) -> DatasetConfig:
+    return replace(
+        DatasetConfig(),
+        samples=samples,
+        shard_size=2,
+        workers=1,
+        output_dir=output_dir,
+    )
+
+
+def test_smoke_dataset_has_declared_schema(tmp_path: Path) -> None:
+    config = _smoke_config(tmp_path, samples=4)
+    manifest = generate_dataset(config)
+    assert manifest.complete
+    assert load_manifest(tmp_path / "manifest.json") == manifest
+    files = sorted(tmp_path.glob("shard-*.h5"))
+    assert len(files) == 2
+    with h5py.File(files[0]) as handle:
+        assert handle["sample_id"].shape == (2,)
+        assert handle["model_kind"].dtype == np.dtype("u1")
+        assert handle["vs"].shape == (2, 20)
+        assert handle["vp"].shape == (2, 20)
+        assert handle["density"].shape == (2, 20)
+        assert handle["phase_velocity"].shape == (2, 4, 120)
+        assert handle["valid_mask"].shape == (2, 4, 120)
+        assert handle["quality_flags"].dtype == np.dtype("u2")
+        assert handle["retry_count"].dtype == np.dtype("u1")
+        assert handle.attrs["accepted_count"] == 2
+
+
+def test_resume_does_not_rewrite_complete_shard(tmp_path: Path) -> None:
+    config = _smoke_config(tmp_path)
+    generate_dataset(config)
+    shard = next(tmp_path.glob("shard-*.h5"))
+    before = shard.read_bytes()
+    generate_dataset(config)
+    assert shard.read_bytes() == before
+
+
+def test_conflicting_configuration_is_rejected(tmp_path: Path) -> None:
+    first = _smoke_config(tmp_path)
+    generate_dataset(first)
+    second = replace(first, seed=first.seed + 1)
+    with pytest.raises(ValueError, match="configuration hash"):
+        generate_dataset(second)
