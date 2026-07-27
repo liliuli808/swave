@@ -1,0 +1,33 @@
+[physics]
+fmin = 0.5
+fmax = 60.0
+fstep = 0.5
+mode_count = 4
+epsilon = 0.5
+nfine = 2
+quadratic_iterations = 3
+root_tolerance = 1e-8
+dedup_tolerance = 1e-7
+strategy = "quadratic"
+
+[geology]
+layers = 20
+thickness_km = 0.1
+vs_min = 0.30
+vs_max = 2.60
+anomaly_first_layer = 3
+anomaly_last_layer = 12
+normal_fraction = 0.25
+low_fraction = 0.15
+high_fraction = 0.10
+coupled_fraction = 0.50
+empirical_method = "brocher05"
+
+[dataset]
+samples = 1000000
+shard_size = 10000
+seed = 20260727
+workers = 0
+output_dir = "data/production"
+max_model_retries = 8
+
