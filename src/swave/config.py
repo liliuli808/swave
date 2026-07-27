@@ -7,9 +7,10 @@ import hashlib
 import json
 import math
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 
@@ -209,4 +210,3 @@ def load_dataset_config(path: Path | str) -> DatasetConfig:
 def load_training_config(path: Path | str) -> TrainingConfig:
     with Path(path).open("rb") as handle:
         return TrainingConfig.from_mapping(tomllib.load(handle))
-
