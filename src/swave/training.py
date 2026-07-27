@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import random
 from collections import defaultdict
 from dataclasses import dataclass
@@ -223,6 +225,16 @@ def _save_checkpoint(path: Path, payload: dict[str, object]) -> None:
     temporary.replace(path)
 
 
+def _save_history(path: Path, history: dict[str, list[dict[str, float | int]]]) -> None:
+    temporary = path.with_suffix(f"{path.suffix}.tmp-{os.getpid()}")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(history, handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+
+
 def train(config: TrainingConfig) -> Path:
     """Train or resume the four-head model and return the best checkpoint."""
     random.seed(config.seed)
@@ -237,6 +249,7 @@ def train(config: TrainingConfig) -> Path:
     config.output_dir.mkdir(parents=True, exist_ok=True)
     last_path = config.output_dir / "last.pt"
     best_path = config.output_dir / "best.pt"
+    history_path = config.output_dir / "history.json"
 
     model = FourHeadForwardModel().to(device)
     optimizer = torch.optim.AdamW(
@@ -262,6 +275,15 @@ def train(config: TrainingConfig) -> Path:
         best_mae = float(payload["best_validation_mae"])
         torch.set_rng_state(payload["torch_rng_state"].cpu())
         np.random.set_state(payload["numpy_rng_state"])
+    history: dict[str, list[dict[str, float | int]]] = {"epochs": []}
+    if config.resume and history_path.exists():
+        with history_path.open(encoding="utf-8") as handle:
+            loaded_history = json.load(handle)
+        history["epochs"] = [
+            item
+            for item in loaded_history.get("epochs", [])
+            if int(item["epoch"]) < start_epoch
+        ]
 
     validation_loader = DataLoader(
         validation,
@@ -285,6 +307,8 @@ def train(config: TrainingConfig) -> Path:
             generator=generator,
         )
         model.train()
+        training_loss_sum = 0.0
+        training_batches = 0
         for vs, target, mask in train_loader:
             vs = vs.to(device)
             target = target.to(device)
@@ -296,6 +320,9 @@ def train(config: TrainingConfig) -> Path:
             loss = masked_smooth_l1(prediction, normalized_target, mask)
             loss.backward()
             optimizer.step()
+            training_loss_sum += float(loss.detach().item())
+            training_batches += 1
+        learning_rate = float(optimizer.param_groups[0]["lr"])
         scheduler.step()
         validation_mae = _validation_mae(
             model, validation_loader, normalization, device
@@ -316,6 +343,15 @@ def train(config: TrainingConfig) -> Path:
         _save_checkpoint(last_path, payload)
         if improved:
             _save_checkpoint(best_path, payload)
+        history["epochs"].append(
+            {
+                "epoch": epoch,
+                "training_loss": training_loss_sum / training_batches,
+                "validation_mae_km_s": validation_mae,
+                "learning_rate": learning_rate,
+            }
+        )
+        _save_history(history_path, history)
 
     if best_path.exists():
         return best_path

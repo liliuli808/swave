@@ -86,6 +86,9 @@ def test_one_epoch_produces_loadable_checkpoint(tmp_path: Path) -> None:
         )
     )
     assert checkpoint == run_dir / "best.pt"
+    history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
+    assert len(history["epochs"]) == 1
+    assert np.isfinite(history["epochs"][0]["training_loss"])
     predictor = ForwardPredictor.load(checkpoint, device="cpu")
     output = predictor.predict(np.linspace(0.4, 2.0, 20))
     assert output.shape == (4, 120)
