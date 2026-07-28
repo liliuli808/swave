@@ -153,6 +153,21 @@ frequencies, phase_velocity = predictor.predict_with_frequencies(vs)
 
 Batch input with shape `(N, 20)` produces `(N, 4, 120)`.
 
+To compare one test-set `Vs` profile against its true and predicted M0–M3
+curves in a five-panel figure, run:
+
+```bash
+python scripts/plot_five_panel_comparison.py \
+  --dataset-dir data/production \
+  --checkpoint runs/production-48g/best.pt \
+  --output results/five-panel-comparison.png
+```
+
+Without `--sample-id`, the script selects the first coupled model in the test
+split. The printed JSON reports the selected sample, output path, and per-mode
+MAE and relative error. The script verifies the complete dataset and checkpoint
+dataset hash before plotting.
+
 ## Numerical methods and quality policy
 
 The solver propagates the unnormalized Rayleigh-wave Dunkin delta matrix and
