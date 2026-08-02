@@ -1,0 +1,496 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import replace
+from pathlib import Path
+
+import h5py
+import numpy as np
+import pytest
+
+import swave.inversion_report as report_module
+from swave.config import InversionConfig
+from swave.inversion_report import (
+    build_inversion_report,
+    compute_frequency_metrics,
+    compute_interval_metrics,
+    compute_inversion_metrics,
+    compute_vs_metrics,
+)
+from swave.inversion_results import (
+    ResultBatch,
+    initialize_result_manifest,
+    mark_job_complete,
+    write_result_shard,
+)
+
+IDS = np.array([90, 91, 92, 93], dtype=np.uint64)
+KINDS = np.arange(4, dtype=np.uint8)
+
+
+def _result_batch(
+    truth: np.ndarray,
+    *,
+    offset: float,
+    deep: bool,
+    sample_ids: np.ndarray = IDS,
+    model_kinds: np.ndarray = KINDS,
+) -> ResultBatch:
+    count = truth.shape[0]
+    if sample_ids.shape != (count,) or model_kinds.shape != (count,):
+        raise ValueError("fixture identities must align with truth")
+    recovered = np.asarray(truth + offset, dtype=np.float32)
+    observed = np.ones((count, 4, 120), dtype=np.float32)
+    surrogate = np.asarray(observed + offset, dtype=np.float32)
+    arguments: dict[str, np.ndarray | None] = {
+        "sample_id": np.asarray(sample_ids, dtype=np.uint64),
+        "model_kind": np.asarray(model_kinds, dtype=np.uint8),
+        "success": np.ones(count, dtype=np.bool_),
+        "status": np.zeros(count, dtype=np.int32),
+        "iterations": np.arange(1, count + 1, dtype=np.int32),
+        "evaluations": np.arange(2, count + 2, dtype=np.int32),
+        "initial_objective": np.full(count, 2.0, dtype=np.float64),
+        "final_objective": np.full(count, 1.0, dtype=np.float64),
+        "data_misfit": np.full(count, 0.75, dtype=np.float64),
+        "regularization": np.full(count, 0.25, dtype=np.float64),
+        "reference_vs": np.asarray(truth, dtype=np.float32),
+        "inverted_vs": recovered,
+        "observed_phase_velocity": observed,
+        "surrogate_phase_velocity": surrogate,
+        "valid_mask": np.ones_like(observed, dtype=np.bool_),
+        "failure_code": np.full(count, b"", dtype="S64"),
+    }
+    if deep:
+        starts = 2
+        arguments.update(
+            ensemble_vs=np.broadcast_to(
+                recovered[:, None, :], (count, starts, 20)
+            ).copy(),
+            ensemble_success=np.ones((count, starts), dtype=np.bool_),
+            ensemble_status=np.zeros((count, starts), dtype=np.int32),
+            ensemble_objective=np.ones((count, starts), dtype=np.float64),
+            ensemble_inlier_mask=np.ones((count, starts), dtype=np.bool_),
+            median_vs=recovered.copy(),
+            p10_vs=np.asarray(recovered - 0.1, dtype=np.float32),
+            p90_vs=np.asarray(recovered + 0.1, dtype=np.float32),
+            physical_phase_velocity=np.asarray(
+                observed + offset + 0.05, dtype=np.float32
+            ),
+            physical_valid_mask=np.ones_like(observed, dtype=np.bool_),
+        )
+    return ResultBatch(**arguments)  # type: ignore[arg-type]
+
+
+def _source_dataset(tmp_path: Path) -> tuple[Path, np.ndarray]:
+    directory = tmp_path / "dataset"
+    directory.mkdir()
+    truth = np.linspace(0.5, 1.5, 80, dtype=np.float32).reshape(4, 20)
+    with h5py.File(directory / "shard-00000.h5", "w") as handle:
+        handle.create_dataset("sample_id", data=IDS, dtype="u8")
+        handle.create_dataset("vs", data=truth, dtype="f4")
+    (directory / "manifest.json").write_text(
+        json.dumps({"config_hash": "a" * 64, "complete": True}), encoding="utf-8"
+    )
+    return directory, truth
+
+
+def _complete_results(tmp_path: Path, checkpoint: Path, truth: np.ndarray) -> Path:
+    results = tmp_path / "results"
+    jobs = (
+        "full-clean-shard-00000",
+        "full-noise_1pct-shard-00000",
+        "deep-clean-shard-00000",
+        "deep-noise_1pct-shard-00000",
+    )
+    config = InversionConfig(initial_models=2, minimum_valid_solutions=1)
+    manifest = initialize_result_manifest(
+        results,
+        dataset_config_hash="a" * 64,
+        checkpoint=checkpoint,
+        config=config,
+        experiment="both",
+        expected_jobs=jobs,
+    )
+    for job in jobs:
+        deep = job.startswith("deep-")
+        offset = 0.05 if "-clean-" in job else 0.15
+        path = write_result_shard(
+            results,
+            job,
+            _result_batch(truth, offset=offset, deep=deep),
+            manifest,
+        )
+        mark_job_complete(results, job, path)
+    return results
+
+
+def test_compute_vs_metrics_reports_exact_scalar_and_layer_values() -> None:
+    truth = np.array([[1.0] * 20, [2.0] * 20], dtype=np.float64)
+    recovered = np.array([[1.1] * 20, [1.8] * 20], dtype=np.float64)
+
+    metrics = compute_vs_metrics(truth, recovered)
+
+    assert metrics["row_count"] == 2
+    assert metrics["value_count"] == 40
+    assert metrics["mae_km_s"] == pytest.approx(0.15)
+    assert metrics["rmse_km_s"] == pytest.approx(np.sqrt(0.025))
+    assert metrics["mean_relative_percent"] == pytest.approx(10.0)
+    assert metrics["p95_absolute_error_km_s"] == pytest.approx(0.2)
+    assert metrics["zero_truth_count"] == 0
+    assert metrics["relative_denominator_count"] == 40
+    assert metrics["per_layer"]["mae_km_s"] == pytest.approx([0.15] * 20)
+    assert metrics["per_layer"]["bias_km_s"] == pytest.approx([-0.05] * 20)
+
+
+def test_compute_vs_metrics_explicitly_excludes_zero_truth_denominators() -> None:
+    truth = np.zeros((1, 20), dtype=np.float64)
+    recovered = np.ones((1, 20), dtype=np.float64)
+
+    metrics = compute_vs_metrics(truth, recovered)
+
+    assert metrics["mean_relative_percent"] is None
+    assert metrics["zero_truth_count"] == 20
+    assert metrics["relative_denominator_count"] == 0
+
+
+def test_frequency_metrics_ignore_noncanonical_infinity_outside_masks() -> None:
+    observed = np.array(
+        [[[[1.0, 2.0, np.inf], [3.0, 4.0, np.inf]]]], dtype=np.float64
+    ).reshape(1, 2, 3)
+    predicted = np.array(
+        [[[[1.5, 1.5, -np.inf], [2.0, 6.0, np.inf]]]], dtype=np.float64
+    ).reshape(1, 2, 3)
+    observed_mask = np.array(
+        [[[[True, True, False], [True, True, False]]]], dtype=np.bool_
+    ).reshape(1, 2, 3)
+    predicted_mask = np.array(
+        [[[[True, False, False], [True, True, False]]]], dtype=np.bool_
+    ).reshape(1, 2, 3)
+
+    metrics = compute_frequency_metrics(
+        observed,
+        predicted,
+        observed_mask,
+        predicted_mask=predicted_mask,
+    )
+
+    assert metrics["overall"]["observed_count"] == 4
+    assert metrics["overall"]["compared_count"] == 3
+    assert metrics["overall"]["missing_fraction"] == pytest.approx(0.25)
+    assert metrics["overall"]["mae_km_s"] == pytest.approx(7.0 / 6.0)
+    assert metrics["mode_0"]["compared_count"] == 1
+    assert metrics["mode_1"]["mae_km_s"] == pytest.approx(1.5)
+
+
+def test_frequency_metrics_reject_nonfinite_values_inside_masks() -> None:
+    observed = np.ones((1, 4, 3), dtype=np.float64)
+    predicted = observed.copy()
+    mask = np.ones_like(observed, dtype=np.bool_)
+    predicted[0, 0, 0] = np.inf
+
+    with pytest.raises(ValueError, match="non-finite.*active mask"):
+        compute_frequency_metrics(observed, predicted, mask)
+
+
+def test_interval_metrics_report_exact_coverage_and_width() -> None:
+    truth = np.array([[1.0] * 20, [2.0] * 20], dtype=np.float64)
+    p10 = np.array([[0.9] * 20, [2.1] * 20], dtype=np.float64)
+    p90 = np.array([[1.1] * 20, [2.5] * 20], dtype=np.float64)
+
+    metrics = compute_interval_metrics(truth, p10, p90)
+
+    assert metrics["coverage_fraction"] == pytest.approx(0.5)
+    assert metrics["mean_interval_width_km_s"] == pytest.approx(0.3)
+    assert metrics["per_layer"]["coverage_fraction"] == pytest.approx([0.5] * 20)
+    assert metrics["per_layer"]["mean_interval_width_km_s"] == pytest.approx([0.3] * 20)
+
+
+def test_compute_inversion_metrics_keeps_failures_out_of_accuracy() -> None:
+    truth = np.linspace(0.5, 1.5, 80, dtype=np.float32).reshape(4, 20)
+    batch = _result_batch(truth, offset=0.1, deep=False)
+    failed = replace(
+        batch,
+        success=np.array([True, True, True, False], dtype=np.bool_),
+        failure_code=np.array([b"", b"", b"", b"optimizer_failure"], dtype="S64"),
+    )
+
+    metrics = compute_inversion_metrics(failed, truth)
+
+    assert metrics["sample_count"] == 4
+    assert metrics["successful_count"] == 3
+    assert metrics["convergence"]["success_fraction"] == pytest.approx(0.75)
+    assert metrics["convergence"]["failure_code_counts"] == {"optimizer_failure": 1}
+    assert metrics["vs"]["row_count"] == 3
+    assert metrics["vs"]["mae_km_s"] == pytest.approx(0.1)
+    assert metrics["vs"]["per_layer"]["recovery_fraction"] == pytest.approx([0.75] * 20)
+    assert metrics["surrogate_frequency"]["mode_0"]["mae_km_s"] == pytest.approx(0.1)
+
+
+def test_compute_inversion_metrics_adds_physical_and_interval_metrics() -> None:
+    truth = np.linspace(0.5, 1.5, 80, dtype=np.float32).reshape(4, 20)
+    batch = _result_batch(truth, offset=0.05, deep=True)
+
+    metrics = compute_inversion_metrics(batch, truth)
+
+    assert metrics["physical_frequency"]["overall"]["mae_km_s"] == pytest.approx(0.1)
+    assert metrics["uncertainty"]["coverage_fraction"] == pytest.approx(1.0)
+    assert metrics["uncertainty"]["mean_interval_width_km_s"] == pytest.approx(0.2)
+
+
+def test_physical_metrics_mask_invalid_infinities_without_contamination() -> None:
+    truth = np.linspace(0.5, 1.5, 80, dtype=np.float32).reshape(4, 20)
+    batch = _result_batch(truth, offset=0.05, deep=True)
+    assert batch.physical_phase_velocity is not None
+    assert batch.physical_valid_mask is not None
+    physical = batch.physical_phase_velocity.copy()
+    physical_mask = batch.physical_valid_mask.copy()
+    physical[0, 0, 0] = np.inf
+    physical_mask[0, 0, 0] = False
+    masked = replace(
+        batch,
+        physical_phase_velocity=physical,
+        physical_valid_mask=physical_mask,
+    )
+
+    metrics = compute_inversion_metrics(masked, truth)
+
+    assert metrics["physical_frequency"]["overall"][
+        "missing_fraction"
+    ] == pytest.approx(1.0 / (4 * 4 * 120))
+    assert metrics["physical_frequency"]["overall"]["mae_km_s"] == pytest.approx(0.1)
+
+
+def test_load_true_vs_reads_only_unique_requested_rows_in_requested_order(
+    tmp_path: Path,
+) -> None:
+    directory, truth = _source_dataset(tmp_path)
+    extra = directory / "shard-00001.h5"
+    with h5py.File(extra, "w") as handle:
+        handle.create_dataset("sample_id", data=np.array([94], dtype=np.uint64))
+        handle.create_dataset("vs", data=np.full((1, 20), np.inf, dtype=np.float32))
+
+    loaded = report_module._load_true_vs(directory, np.array([93, 90], dtype=np.uint64))
+
+    assert loaded == pytest.approx(truth[[3, 0]])
+
+
+def test_load_true_vs_rejects_duplicate_requests_and_missing_rows(
+    tmp_path: Path,
+) -> None:
+    directory, _ = _source_dataset(tmp_path)
+
+    with pytest.raises(ValueError, match="requested.*duplicate"):
+        report_module._load_true_vs(directory, np.array([90, 90], dtype=np.uint64))
+    with pytest.raises(ValueError, match="missing.*999"):
+        report_module._load_true_vs(directory, np.array([999], dtype=np.uint64))
+
+
+def test_load_true_vs_rejects_duplicate_source_rows(tmp_path: Path) -> None:
+    directory, _ = _source_dataset(tmp_path)
+    with h5py.File(directory / "shard-00001.h5", "w") as handle:
+        handle.create_dataset("sample_id", data=np.array([90], dtype=np.uint64))
+        handle.create_dataset("vs", data=np.ones((1, 20), dtype=np.float32))
+
+    with pytest.raises(ValueError, match="duplicate requested sample_id 90"):
+        report_module._load_true_vs(directory, np.array([90], dtype=np.uint64))
+
+
+def test_load_true_vs_rejects_invalid_requested_truth_but_not_unrequested_truth(
+    tmp_path: Path,
+) -> None:
+    directory, _ = _source_dataset(tmp_path)
+    with h5py.File(directory / "shard-00000.h5", "r+") as handle:
+        handle["vs"][1, 0] = np.float32(9.0)
+
+    assert report_module._load_true_vs(directory, [90]).shape == (1, 20)
+    with pytest.raises(ValueError, match="outside bounds"):
+        report_module._load_true_vs(directory, [91])
+
+
+def test_report_validates_complete_results_before_loading_truth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "manifest.json").write_text("{}", encoding="utf-8")
+    events: list[str] = []
+    monkeypatch.setattr(
+        report_module,
+        "validate_complete_results",
+        lambda path: (
+            events.append("validated")
+            or (_ for _ in ()).throw(ValueError("result manifest is incomplete"))
+        ),
+    )
+    monkeypatch.setattr(
+        report_module,
+        "_load_true_vs",
+        lambda path, ids: events.append("truth"),
+    )
+
+    with pytest.raises(ValueError, match="incomplete"):
+        build_inversion_report(results, tmp_path / "dataset", tmp_path / "report")
+
+    assert events == ["validated"]
+
+
+def test_report_rejects_corrupt_result_before_truth_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset, truth = _source_dataset(tmp_path)
+    checkpoint = tmp_path / "best.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    results = _complete_results(tmp_path, checkpoint, truth)
+    with h5py.File(results / "full-clean-shard-00000.h5", "r+") as handle:
+        handle["sample_id"][0] = np.uint64(90_000)
+    events: list[str] = []
+    monkeypatch.setattr(
+        report_module,
+        "_load_true_vs",
+        lambda path, ids: events.append("truth"),
+    )
+
+    with pytest.raises(ValueError, match="checksum|content|sample_id"):
+        build_inversion_report(results, dataset, tmp_path / "report")
+
+    assert events == []
+
+
+def test_report_rejects_clean_noisy_sample_mismatch_before_truth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset, truth = _source_dataset(tmp_path)
+    checkpoint = tmp_path / "best.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    results = tmp_path / "mismatched-results"
+    jobs = (
+        "full-clean-shard-00000",
+        "full-noise_1pct-shard-00000",
+    )
+    manifest = initialize_result_manifest(
+        results,
+        dataset_config_hash="a" * 64,
+        checkpoint=checkpoint,
+        config=InversionConfig(),
+        experiment="full",
+        expected_jobs=jobs,
+    )
+    clean = _result_batch(truth, offset=0.05, deep=False)
+    noisy = _result_batch(
+        truth[:3],
+        offset=0.15,
+        deep=False,
+        sample_ids=IDS[:3],
+        model_kinds=KINDS[:3],
+    )
+    for job, batch in zip(jobs, (clean, noisy), strict=True):
+        path = write_result_shard(results, job, batch, manifest)
+        mark_job_complete(results, job, path)
+    events: list[str] = []
+    original = report_module._load_true_vs
+    monkeypatch.setattr(
+        report_module,
+        "_load_true_vs",
+        lambda path, ids: events.append("truth") or original(path, ids),
+    )
+
+    with pytest.raises(ValueError, match="clean and noisy.*align"):
+        build_inversion_report(results, dataset, tmp_path / "report")
+
+    assert events == []
+
+
+def test_report_rejects_a_plot_group_without_successful_rows(tmp_path: Path) -> None:
+    dataset, truth = _source_dataset(tmp_path)
+    checkpoint = tmp_path / "best.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    results = tmp_path / "failed-kind-results"
+    jobs = (
+        "full-clean-shard-00000",
+        "full-noise_1pct-shard-00000",
+    )
+    manifest = initialize_result_manifest(
+        results,
+        dataset_config_hash="a" * 64,
+        checkpoint=checkpoint,
+        config=InversionConfig(),
+        experiment="full",
+        expected_jobs=jobs,
+    )
+    for job in jobs:
+        batch = _result_batch(truth, offset=0.05, deep=False)
+        success = batch.success.copy()
+        success[3] = False
+        failure_code = batch.failure_code.copy()
+        failure_code[3] = b"optimizer_failure"
+        failed_kind = replace(batch, success=success, failure_code=failure_code)
+        path = write_result_shard(results, job, failed_kind, manifest)
+        mark_job_complete(results, job, path)
+
+    with pytest.raises(ValueError, match="empty successful group.*coupled"):
+        build_inversion_report(results, dataset, tmp_path / "report")
+
+
+def test_report_separates_scopes_and_writes_deterministic_artifacts(
+    tmp_path: Path,
+) -> None:
+    dataset, truth = _source_dataset(tmp_path)
+    checkpoint = tmp_path / "best.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    results = _complete_results(tmp_path, checkpoint, truth)
+    first_output = tmp_path / "report-a"
+    second_output = tmp_path / "report-b"
+
+    first = build_inversion_report(results, dataset, first_output)
+    second = build_inversion_report(results, dataset, second_output)
+
+    assert first == second
+    assert set(first["experiment_scopes"]) == {"full", "deep"}
+    assert first["experiment_scopes"]["full"]["scope_label"] == (
+        "full single-start population"
+    )
+    assert first["experiment_scopes"]["deep"]["scope_label"] == (
+        "deep multi-start uncertainty"
+    )
+    assert first["experiment_scopes"]["full"]["groups"]["overall"]["sample_count"] == 8
+    assert first["experiment_scopes"]["deep"]["groups"]["overall"]["sample_count"] == 8
+    assert first["experiment_scopes"]["full"]["clean_to_noise_1pct_delta"]["overall"][
+        "vs_mae_km_s"
+    ] == pytest.approx(0.1)
+    assert first["representatives"]["normal"]["clean"]["sample_id"] == 90
+
+    expected_pngs = {
+        "vs-error-by-depth.png",
+        "vs-error-by-kind-and-noise.png",
+        "optimization-diagnostics.png",
+        *{
+            f"representative-{kind}-{noise}.png"
+            for kind in ("normal", "low_velocity", "high_velocity", "coupled")
+            for noise in ("clean", "noise_1pct")
+        },
+    }
+    first_pngs = {path.name for path in first_output.glob("*.png")}
+    assert first_pngs == expected_pngs
+    assert all((first_output / name).stat().st_size > 0 for name in expected_pngs)
+    assert (first_output / "summary.json").stat().st_size > 0
+    assert not list(first_output.glob("summary.json.tmp-*"))
+    for name in expected_pngs:
+        first_hash = hashlib.sha256((first_output / name).read_bytes()).hexdigest()
+        second_hash = hashlib.sha256((second_output / name).read_bytes()).hexdigest()
+        assert first_hash == second_hash
+
+
+@pytest.mark.parametrize(
+    ("truth", "recovered", "message"),
+    [
+        (np.ones((0, 20)), np.ones((0, 20)), "nonempty"),
+        (np.ones((1, 19)), np.ones((1, 19)), "20 layers"),
+        (np.ones((1, 20)), np.full((1, 20), np.nan), "finite"),
+    ],
+)
+def test_compute_vs_metrics_rejects_invalid_groups(
+    truth: np.ndarray, recovered: np.ndarray, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        compute_vs_metrics(truth, recovered)
