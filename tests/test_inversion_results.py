@@ -161,6 +161,16 @@ def test_result_batch_requires_all_deep_fields_with_consistent_start_count() -> 
         replace(_deep_batch(), ensemble_status=np.zeros((2, 2), dtype=np.int32))
 
 
+def test_successful_deep_row_requires_a_successful_inlier_start() -> None:
+    base = _deep_batch()
+    with pytest.raises(ValueError, match="successful deep.*inlier"):
+        replace(
+            base,
+            ensemble_success=np.zeros((2, 3), dtype=np.bool_),
+            ensemble_inlier_mask=np.zeros((2, 3), dtype=np.bool_),
+        )
+
+
 def test_result_batch_rejects_nan_success_and_allows_diagnostic_failure() -> None:
     invalid = _batch()
     objectives = invalid.final_objective.copy()
@@ -239,6 +249,7 @@ def test_deep_result_fields_round_trip(tmp_path: Path, checkpoint: Path) -> None
         dataset_config_hash="a" * 64,
         checkpoint=checkpoint,
         inversion_config_hash="b" * 64,
+        minimum_valid_solutions=2,
         experiment="deep",
         expected_jobs=("deep-clean-shard-00000",),
     )
@@ -250,6 +261,143 @@ def test_deep_result_fields_round_trip(tmp_path: Path, checkpoint: Path) -> None
     assert loaded.ensemble_vs is not None
     assert loaded.ensemble_vs.shape == (2, 3, 20)
     assert loaded.physical_phase_velocity is not None
+
+
+def test_deep_job_rejects_a_full_style_result_batch(
+    tmp_path: Path, checkpoint: Path
+) -> None:
+    job = "deep-clean-shard-00000"
+    manifest = initialize_result_manifest(
+        tmp_path,
+        dataset_config_hash="a" * 64,
+        checkpoint=checkpoint,
+        inversion_config_hash="b" * 64,
+        minimum_valid_solutions=2,
+        experiment="deep",
+        expected_jobs=(job,),
+    )
+
+    with pytest.raises(ValueError, match="deep.*optional|deep.*ensemble"):
+        write_result_shard(tmp_path, job, _batch(), manifest)
+
+
+def test_deep_success_must_meet_bound_minimum_valid_solutions(
+    tmp_path: Path, checkpoint: Path
+) -> None:
+    job = "deep-clean-shard-00000"
+    manifest = initialize_result_manifest(
+        tmp_path,
+        dataset_config_hash="a" * 64,
+        checkpoint=checkpoint,
+        inversion_config_hash="b" * 64,
+        minimum_valid_solutions=2,
+        experiment="deep",
+        expected_jobs=(job,),
+    )
+    one_inlier = replace(
+        _deep_batch(),
+        ensemble_success=np.array(
+            [[True, False, False], [True, False, False]], dtype=np.bool_
+        ),
+        ensemble_inlier_mask=np.array(
+            [[True, False, False], [True, False, False]], dtype=np.bool_
+        ),
+    )
+
+    assert manifest.minimum_valid_solutions == 2
+    with pytest.raises(ValueError, match="identity"):
+        initialize_result_manifest(
+            tmp_path,
+            dataset_config_hash="a" * 64,
+            checkpoint=checkpoint,
+            inversion_config_hash="b" * 64,
+            minimum_valid_solutions=3,
+            experiment="deep",
+            expected_jobs=(job,),
+        )
+    with pytest.raises(ValueError, match="minimum_valid_solutions|inlier.*minimum"):
+        write_result_shard(tmp_path, job, one_inlier, manifest)
+
+
+def test_deep_minimum_is_derived_from_and_bound_to_inversion_config(
+    tmp_path: Path, checkpoint: Path
+) -> None:
+    config = replace(InversionConfig(), initial_models=3, minimum_valid_solutions=2)
+    job = "deep-clean-shard-00000"
+    manifest = initialize_result_manifest(
+        tmp_path,
+        dataset_config_hash="a" * 64,
+        checkpoint=checkpoint,
+        config=config,
+        experiment="deep",
+        expected_jobs=(job,),
+    )
+
+    assert manifest.minimum_valid_solutions == 2
+    assert manifest.inversion_config_hash == inversion_identity_hash(config)
+    with pytest.raises(ValueError, match="minimum_valid_solutions.*config"):
+        initialize_result_manifest(
+            tmp_path / "conflict",
+            dataset_config_hash="a" * 64,
+            checkpoint=checkpoint,
+            config=config,
+            minimum_valid_solutions=1,
+            experiment="deep",
+            expected_jobs=(job,),
+        )
+
+
+def test_insufficient_valid_solutions_code_requires_too_few_inliers(
+    tmp_path: Path, checkpoint: Path
+) -> None:
+    job = "deep-clean-shard-00000"
+    manifest = initialize_result_manifest(
+        tmp_path,
+        dataset_config_hash="a" * 64,
+        checkpoint=checkpoint,
+        inversion_config_hash="b" * 64,
+        minimum_valid_solutions=2,
+        experiment="deep",
+        expected_jobs=(job,),
+    )
+    base = _deep_batch()
+    inconsistent = replace(
+        base,
+        success=np.zeros(2, dtype=np.bool_),
+        failure_code=np.full(2, b"insufficient_valid_solutions", dtype="S64"),
+    )
+
+    with pytest.raises(ValueError, match="insufficient_valid_solutions.*inlier"):
+        write_result_shard(tmp_path, job, inconsistent, manifest)
+
+
+def test_insufficient_valid_solutions_cannot_publish_arbitrary_summary(
+    tmp_path: Path, checkpoint: Path
+) -> None:
+    job = "deep-clean-shard-00000"
+    manifest = initialize_result_manifest(
+        tmp_path,
+        dataset_config_hash="a" * 64,
+        checkpoint=checkpoint,
+        inversion_config_hash="b" * 64,
+        minimum_valid_solutions=2,
+        experiment="deep",
+        expected_jobs=(job,),
+    )
+    inconsistent = replace(
+        _deep_batch(),
+        success=np.zeros(2, dtype=np.bool_),
+        failure_code=np.full(2, b"insufficient_valid_solutions", dtype="S64"),
+        ensemble_success=np.array(
+            [[True, False, False], [True, False, False]], dtype=np.bool_
+        ),
+        ensemble_inlier_mask=np.array(
+            [[True, False, False], [True, False, False]], dtype=np.bool_
+        ),
+    )
+
+    with pytest.raises(ValueError, match="insufficient_valid_solutions.*summary"):
+        write_result_shard(tmp_path, job, inconsistent, manifest)
 
 
 @pytest.mark.parametrize("dataset", ["sample_id", "inverted_vs", "status"])
@@ -341,6 +489,30 @@ def test_result_directory_rejects_a_symlinked_parent(
             experiment="full",
             expected_jobs=(JOB_A,),
         )
+
+
+def test_result_directory_rejects_symlink_before_parent_traversal(
+    tmp_path: Path, checkpoint: Path
+) -> None:
+    inside = tmp_path / "inside"
+    inside.mkdir()
+    outside = tmp_path / "outside"
+    pivot = outside / "pivot"
+    pivot.mkdir(parents=True)
+    (inside / "link").symlink_to(pivot, target_is_directory=True)
+    apparent = inside / "link" / ".." / "escaped-results"
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        initialize_result_manifest(
+            apparent,
+            dataset_config_hash="a" * 64,
+            checkpoint=checkpoint,
+            inversion_config_hash="b" * 64,
+            experiment="full",
+            expected_jobs=(JOB_A,),
+        )
+
+    assert not (outside / "escaped-results" / "manifest.json").exists()
 
 
 def test_initialization_resumes_exact_identity_and_rejects_conflicts(

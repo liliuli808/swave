@@ -23,7 +23,7 @@ from . import __version__
 from .config import InversionConfig, inversion_identity_hash
 from .splits import SPLIT_POLICY
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 VS_MIN = 0.3
 VS_MAX = 2.6
 CURVE_SHAPE = (4, 120)
@@ -145,6 +145,7 @@ class ResultManifest:
     checkpoint_sha256: str
     split_policy: str
     inversion_config_hash: str
+    minimum_valid_solutions: int | None
     experiment: str
     expected_jobs: tuple[str, ...]
     completed_jobs: tuple[str, ...]
@@ -166,6 +167,13 @@ class ResultManifest:
             raise ValueError("result manifest split policy does not match")
         if self.experiment not in {"full", "deep", "both"}:
             raise ValueError("experiment must be full, deep, or both")
+        if self.minimum_valid_solutions is not None and (
+            type(self.minimum_valid_solutions) is not int
+            or self.minimum_valid_solutions <= 0
+        ):
+            raise ValueError("minimum_valid_solutions must be a positive integer")
+        if self.experiment in {"deep", "both"} and self.minimum_valid_solutions is None:
+            raise ValueError("deep result identity requires minimum_valid_solutions")
         if not isinstance(self.expected_jobs, tuple) or not self.expected_jobs:
             raise ValueError("expected_jobs must be a nonempty tuple")
         if not isinstance(self.completed_jobs, tuple):
@@ -409,6 +417,11 @@ class ResultBatch:
             raise ValueError("failed ensemble start diagnostics are inconsistent")
         if np.any(self.ensemble_inlier_mask & ~self.ensemble_success):
             raise ValueError("ensemble inliers must be successful starts")
+        inlier_counts = np.count_nonzero(self.ensemble_inlier_mask, axis=1)
+        if np.any(self.success & (inlier_counts == 0)):
+            raise ValueError(
+                "successful deep rows require a successful ensemble inlier"
+            )
 
         assert self.median_vs is not None
         assert self.p10_vs is not None
@@ -447,9 +460,16 @@ def _reject_symlink(path: Path, description: str) -> None:
 
 
 def _reject_symlinked_directory_components(directory: Path) -> None:
-    absolute = Path(os.path.abspath(directory))
-    for component in (absolute, *absolute.parents):
-        if component.is_symlink():
+    current = Path(directory.anchor) if directory.is_absolute() else Path.cwd()
+    parts = directory.parts[1:] if directory.is_absolute() else directory.parts
+    for part in parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            current = current.parent
+            continue
+        current /= part
+        if current.is_symlink():
             raise ValueError("result directory path must not contain a symbolic link")
 
 
@@ -584,6 +604,7 @@ def _load_manifest(path: Path) -> ResultManifest:
             checkpoint_sha256=payload["checkpoint_sha256"],
             split_policy=payload["split_policy"],
             inversion_config_hash=payload["inversion_config_hash"],
+            minimum_valid_solutions=payload["minimum_valid_solutions"],
             experiment=payload["experiment"],
             expected_jobs=tuple(payload["expected_jobs"]),
             completed_jobs=tuple(payload["completed_jobs"]),
@@ -603,6 +624,7 @@ def _identity(manifest: ResultManifest) -> tuple[object, ...]:
         manifest.checkpoint_sha256,
         manifest.split_policy,
         manifest.inversion_config_hash,
+        manifest.minimum_valid_solutions,
         manifest.experiment,
         manifest.expected_jobs,
         manifest.package_version,
@@ -616,6 +638,7 @@ def initialize_result_manifest(
     checkpoint: Path | str,
     inversion_config_hash: str | None = None,
     config: InversionConfig | None = None,
+    minimum_valid_solutions: int | None = None,
     experiment: str,
     expected_jobs: tuple[str, ...],
 ) -> ResultManifest:
@@ -624,11 +647,17 @@ def initialize_result_manifest(
     _require_hash(dataset_config_hash, "dataset_config_hash")
     if (inversion_config_hash is None) == (config is None):
         raise ValueError("provide exactly one of inversion_config_hash or config")
-    config_digest = (
-        inversion_identity_hash(config)
-        if config is not None
-        else _require_hash(inversion_config_hash, "inversion_config_hash")
-    )
+    if config is not None:
+        config_digest = inversion_identity_hash(config)
+        if (
+            minimum_valid_solutions is not None
+            and minimum_valid_solutions != config.minimum_valid_solutions
+        ):
+            raise ValueError("minimum_valid_solutions does not match inversion config")
+        configured_minimum = config.minimum_valid_solutions
+    else:
+        config_digest = _require_hash(inversion_config_hash, "inversion_config_hash")
+        configured_minimum = minimum_valid_solutions
     assert config_digest is not None
     checkpoint_digest = checkpoint_sha256(checkpoint)
     candidate = ResultManifest(
@@ -637,6 +666,7 @@ def initialize_result_manifest(
         checkpoint_sha256=checkpoint_digest,
         split_policy=SPLIT_POLICY,
         inversion_config_hash=config_digest,
+        minimum_valid_solutions=configured_minimum,
         experiment=experiment,
         expected_jobs=expected_jobs,
         completed_jobs=(),
@@ -697,7 +727,9 @@ def _write_batch(handle: h5py.File, batch: ResultBatch) -> None:
             handle.create_dataset(name, data=values, dtype=values.dtype)
 
 
-def _validate_shard_identity(handle: h5py.File, manifest: ResultManifest | None) -> str:
+def _validate_shard_identity(
+    handle: h5py.File, manifest: ResultManifest | None
+) -> tuple[str, int | None]:
     if int(handle.attrs.get("schema_version", -1)) != SCHEMA_VERSION:
         raise ValueError("result shard schema version is invalid")
     for name in _IDENTITY_ATTRS[1:]:
@@ -718,8 +750,21 @@ def _validate_shard_identity(handle: h5py.File, manifest: ResultManifest | None)
         "inversion_config_hash",
     )
     job = _require_job_name(_attribute_text(handle.attrs.get("job_name", "")))
+    raw_minimum = handle.attrs.get("minimum_valid_solutions")
+    if raw_minimum is not None and (
+        isinstance(raw_minimum, (bool, np.bool_))
+        or not isinstance(raw_minimum, (int, np.integer))
+    ):
+        raise ValueError("result shard minimum_valid_solutions must be an integer")
+    shard_minimum = None if raw_minimum is None else int(raw_minimum)
+    if shard_minimum is not None and shard_minimum <= 0:
+        raise ValueError("result shard minimum_valid_solutions must be positive")
+    if _job_requires_deep_schema(job, manifest) and shard_minimum is None:
+        raise ValueError(
+            "deep result shard is missing minimum_valid_solutions identity"
+        )
     if manifest is None:
-        return job
+        return job, shard_minimum
     expected_attrs = {
         "schema_version": manifest.schema_version,
         "dataset_config_hash": manifest.dataset_config_hash,
@@ -739,7 +784,67 @@ def _validate_shard_identity(handle: h5py.File, manifest: ResultManifest | None)
             raise ValueError(f"result shard identity attribute {name} does not match")
     if job not in manifest.expected_jobs:
         raise ValueError("result shard job is not expected by the manifest")
-    return job
+    if shard_minimum != manifest.minimum_valid_solutions:
+        raise ValueError("result shard minimum_valid_solutions identity does not match")
+    return job, shard_minimum
+
+
+def _job_requires_deep_schema(job: str, manifest: ResultManifest | None) -> bool:
+    if job.startswith("deep-"):
+        return True
+    if job.startswith("full-"):
+        return False
+    if manifest is not None and manifest.experiment in {"deep", "full"}:
+        return manifest.experiment == "deep"
+    raise ValueError("job name does not identify a full or deep result schema")
+
+
+def _validate_batch_schema_for_job(
+    job: str,
+    batch: ResultBatch,
+    manifest: ResultManifest | None,
+    minimum_valid_solutions: int | None,
+) -> None:
+    requires_deep = _job_requires_deep_schema(job, manifest)
+    has_deep = batch.ensemble_vs is not None
+    if requires_deep and not has_deep:
+        raise ValueError("deep result jobs require all deep optional fields")
+    if not requires_deep and has_deep:
+        raise ValueError("full result jobs must not contain deep optional fields")
+    if not requires_deep:
+        return
+    if minimum_valid_solutions is None:
+        raise ValueError("deep result identity requires minimum_valid_solutions")
+    assert batch.ensemble_inlier_mask is not None
+    starts = batch.ensemble_inlier_mask.shape[1]
+    if minimum_valid_solutions > starts:
+        raise ValueError(
+            "minimum_valid_solutions exceeds the stored ensemble start count"
+        )
+    inlier_counts = np.count_nonzero(batch.ensemble_inlier_mask, axis=1)
+    if np.any(batch.success & (inlier_counts < minimum_valid_solutions)):
+        raise ValueError("successful deep rows do not meet minimum_valid_solutions")
+    codes = _decode_failure_codes(batch.failure_code)
+    for row, code in enumerate(codes):
+        if code != "insufficient_valid_solutions":
+            continue
+        if inlier_counts[row] >= minimum_valid_solutions:
+            raise ValueError(
+                "insufficient_valid_solutions disagrees with ensemble inliers"
+            )
+        assert batch.median_vs is not None
+        assert batch.p10_vs is not None
+        assert batch.p90_vs is not None
+        assert batch.physical_valid_mask is not None
+        if (
+            np.any(np.isfinite(batch.median_vs[row]))
+            or np.any(np.isfinite(batch.p10_vs[row]))
+            or np.any(np.isfinite(batch.p90_vs[row]))
+            or np.any(batch.physical_valid_mask[row])
+        ):
+            raise ValueError(
+                "insufficient_valid_solutions must not publish a deep summary"
+            )
 
 
 def validate_result_shard(
@@ -754,7 +859,7 @@ def validate_result_shard(
     _reject_symlink(source, "result shard")
     try:
         with h5py.File(source, "r") as handle:
-            job = _validate_shard_identity(handle, manifest)
+            job, shard_minimum = _validate_shard_identity(handle, manifest)
             published_name = f"{job}.h5"
             temporary_pattern = rf"{re.escape(published_name)}\.tmp-[0-9]+"
             if (
@@ -797,6 +902,7 @@ def validate_result_shard(
         )
     except (TypeError, ValueError) as error:
         raise ValueError(f"result shard content is invalid: {error}") from error
+    _validate_batch_schema_for_job(job, batch, manifest, shard_minimum)
     if expected_sample_ids is not None:
         expected = np.asarray(expected_sample_ids)
         if expected.dtype != np.dtype(np.uint64) or expected.ndim != 1:
@@ -829,6 +935,9 @@ def write_result_shard(
         raise ValueError("job is not expected by the result manifest")
     if not isinstance(batch, ResultBatch):
         raise TypeError("batch must be a ResultBatch")
+    _validate_batch_schema_for_job(
+        job, batch, manifest, manifest.minimum_valid_solutions
+    )
     target = directory / f"{job}.h5"
     temporary = directory / f"{target.name}.tmp-{os.getpid()}"
     with _locked(directory, f".{job}.lock"):
@@ -846,6 +955,10 @@ def write_result_shard(
                 handle.attrs["checkpoint_sha256"] = manifest.checkpoint_sha256
                 handle.attrs["split_policy"] = manifest.split_policy
                 handle.attrs["inversion_config_hash"] = manifest.inversion_config_hash
+                if manifest.minimum_valid_solutions is not None:
+                    handle.attrs["minimum_valid_solutions"] = (
+                        manifest.minimum_valid_solutions
+                    )
                 handle.attrs["experiment"] = manifest.experiment
                 handle.attrs["package_version"] = manifest.package_version
                 handle.attrs["job_name"] = job
@@ -931,6 +1044,7 @@ def mark_job_complete(
             checkpoint_sha256=manifest.checkpoint_sha256,
             split_policy=manifest.split_policy,
             inversion_config_hash=manifest.inversion_config_hash,
+            minimum_valid_solutions=manifest.minimum_valid_solutions,
             experiment=manifest.experiment,
             expected_jobs=manifest.expected_jobs,
             completed_jobs=completed,
