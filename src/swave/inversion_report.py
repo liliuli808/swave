@@ -16,6 +16,7 @@ import matplotlib
 import numpy as np
 from numpy.typing import NDArray
 
+from .config import DatasetConfig, canonical_hash
 from .geology import ModelKind
 from .inversion_results import (
     ResultBatch,
@@ -1039,6 +1040,7 @@ def _plot_representative(
     output_dir: Path,
     kind_name: str,
     noise: str,
+    frequencies: Sequence[float],
 ) -> str:
     if row.sample_id.size != 1 or not bool(row.success[0]):
         raise ValueError("representative plotting requires one successful deep row")
@@ -1047,6 +1049,14 @@ def _plot_representative(
     assert row.p90_vs is not None
     assert row.physical_phase_velocity is not None
     assert row.physical_valid_mask is not None
+    frequency_values = np.asarray(frequencies, dtype=np.float64)
+    frequency_count = row.observed_phase_velocity.shape[2]
+    if frequency_values.shape != (frequency_count,):
+        raise ValueError(f"frequencies must contain exactly {frequency_count} values")
+    if not np.all(np.isfinite(frequency_values)) or np.any(frequency_values <= 0):
+        raise ValueError("frequencies must be finite and positive")
+    if np.any(np.diff(frequency_values) <= 0):
+        raise ValueError("frequencies must be strictly increasing")
     figure, axes = plt.subplots(1, 5, figsize=(19, 5))
     depth = np.arange(20, dtype=np.float64) * 0.1
     profile_axis = axes[0]
@@ -1062,27 +1072,26 @@ def _plot_representative(
     profile_axis.set_ylabel("Layer-top depth (km)")
     profile_axis.invert_yaxis()
     profile_axis.legend(fontsize=7)
-    frequency_index = np.arange(row.observed_phase_velocity.shape[2])
     for mode, axis in enumerate(axes[1:]):
         observed_mask = row.valid_mask[0, mode]
         physical_mask = observed_mask & row.physical_valid_mask[0, mode]
         axis.plot(
-            frequency_index[observed_mask],
+            frequency_values[observed_mask],
             row.observed_phase_velocity[0, mode, observed_mask],
             label="observed",
         )
         axis.plot(
-            frequency_index[observed_mask],
+            frequency_values[observed_mask],
             row.surrogate_phase_velocity[0, mode, observed_mask],
             label="surrogate",
         )
         axis.plot(
-            frequency_index[physical_mask],
+            frequency_values[physical_mask],
             row.physical_phase_velocity[0, mode, physical_mask],
             label="physical",
         )
         axis.set_title(f"Mode {mode}")
-        axis.set_xlabel("Frequency-grid index")
+        axis.set_xlabel("Frequency (Hz)")
         axis.set_ylabel("Phase velocity (km/s)")
         if mode == 0:
             axis.legend(fontsize=7)
@@ -1115,6 +1124,8 @@ def build_inversion_report(
     results_dir: Path | str,
     dataset_dir: Path | str,
     output_dir: Path | str,
+    *,
+    dataset_config: DatasetConfig | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic report after validating the complete result set."""
     results_path = Path(results_dir)
@@ -1126,6 +1137,12 @@ def build_inversion_report(
     grouped_batches = _load_result_groups(results_path, manifest)
     requested_ids = _validate_result_alignment(grouped_batches)
     _dataset_identity(dataset_path, manifest.dataset_config_hash)
+    if dataset_config is not None and canonical_hash(dataset_config) != (
+        manifest.dataset_config_hash
+    ):
+        raise ValueError(
+            "report dataset configuration does not match inversion results"
+        )
 
     # The only source-HDF5 Vs access is here, for the exact unique requested IDs.
     truth = _load_true_vs(dataset_path, requested_ids)
@@ -1135,6 +1152,7 @@ def build_inversion_report(
         experiment: _scope_rows(batches_by_noise, truth_by_id)
         for experiment, batches_by_noise in sorted(grouped_batches.items())
     }
+    frequencies = (dataset_config or DatasetConfig()).physics.frequencies
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     if not output_path.is_dir():
@@ -1190,7 +1208,11 @@ def build_inversion_report(
                 index = int(successful[np.argmin(candidate_ids)])
                 representative = _take_rows(group, np.asarray([index], dtype=np.intp))
                 figure_name = _plot_representative(
-                    representative, output_path, kind_name, noise
+                    representative,
+                    output_path,
+                    kind_name,
+                    noise,
+                    frequencies,
                 )
                 figures.append(figure_name)
                 representatives[kind_name][noise] = {

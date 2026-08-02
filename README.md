@@ -81,9 +81,20 @@ shard is accepted as complete.
 
 ## Train and evaluate
 
-The split is stable across shards: `sample_id % 100` assigns 0–89 to training,
-90–94 to validation, and 95–99 to testing. Consequently, a training smoke run
-needs sample IDs spanning at least 0–95; use at least 100 generated samples.
+The split is stable across shards and is defined only by `sample_id % 100`:
+
+| Remainder | Split | Share | Purpose |
+| --- | --- | ---: | --- |
+| 0–79 | `train` | 80% | Fit network parameters and normalization statistics |
+| 80–84 | `validation` | 5% | Select the training checkpoint |
+| 85–89 | `test` | 5% | Final forward-surrogate evaluation |
+| 90–99 | `inversion` | 10% | Independent inversion experiment |
+
+The policy identifier is `mod100-v2-80-5-5-10`. Checkpoints made with the
+previous 90/5/5 split are intentionally incompatible with inversion: a new
+checkpoint must contain the current policy identifier so inversion rows cannot
+have influenced training or model selection. A training smoke run needs sample
+IDs spanning at least 0–89; use at least 100 generated samples.
 
 ```bash
 swave train \
@@ -95,10 +106,10 @@ swave train \
   --device cpu
 ```
 
-Production training uses the defaults in `configs/training.toml`:
+Production training on the external machine uses the 48 GB configuration:
 
 ```bash
-swave train --config configs/training.toml
+swave train --config configs/training-48g.toml
 ```
 
 Training streams HDF5 rows, computes normalization from valid training cells
@@ -116,6 +127,62 @@ swave evaluate \
 
 Evaluation reports per-mode MAE, RMSE, 95th-percentile absolute error, and valid
 cell counts in physical units.
+
+## Run the inversion experiment
+
+Inversion minimizes a bounded L-BFGS-B objective consisting of modal-frequency
+data misfit plus vertical smoothness regularization. It recovers 20 `Vs` values
+from observations only: source-dataset truth is unavailable to initialization,
+bounds, objectives, gradients, and optimization, and is joined by the reporter
+only after all result identities and shards validate. Each selected sample is
+run in two separately reported scenarios: the unchanged `clean` curve and
+deterministic `noise_1pct` observations with 1% relative Gaussian noise on valid
+modal cells only.
+
+The formal million-sample generation, production training, full inversion
+holdout, and deep multi-start experiment are intentionally run on an external
+machine. From the repository root, run these commands in order:
+
+```bash
+swave generate --config configs/dataset.toml
+swave train --config configs/training-48g.toml
+swave invert --config configs/inversion.toml --experiment both
+swave inversion-report \
+  --results-dir results/inversion \
+  --dataset-dir data/production \
+  --output-dir results/inversion-report
+```
+
+The `both` workflow first defines the complete immutable result manifest and
+then runs the full single-start population experiment and the stratified deep
+multi-start experiment. Repeating the same command validates completed shards
+and resumes only missing work. Do not build the report until every expected job
+is complete.
+
+For a four-task cluster sharing the same dataset, checkpoint, configuration,
+and result directory, launch exactly these four invocations. They differ only
+in `--task-index`; `--task-count` remains 4:
+
+```bash
+swave invert --config configs/inversion.toml --experiment both --task-index 0 --task-count 4
+swave invert --config configs/inversion.toml --experiment both --task-index 1 --task-count 4
+swave invert --config configs/inversion.toml --experiment both --task-index 2 --task-count 4
+swave invert --config configs/inversion.toml --experiment both --task-index 3 --task-count 4
+```
+
+After all four tasks finish successfully, run one report command:
+
+```bash
+swave inversion-report \
+  --results-dir results/inversion \
+  --dataset-dir data/production \
+  --output-dir results/inversion-report
+```
+
+CPU tasks may override `--workers`. CUDA inversion must use one worker per task;
+multi-GPU scheduling is external, with one visible device assigned to each
+cluster task. Task partitioning changes execution ownership only and does not
+change deterministic sample, noise, or initial-model seeds.
 
 ## Predict and plot
 
@@ -217,7 +284,7 @@ full production job.
 
 ```bash
 python -m pytest -q
-ruff check src tests
+ruff check src tests scripts
 python -m build
 ```
 

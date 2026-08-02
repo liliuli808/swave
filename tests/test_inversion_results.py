@@ -230,6 +230,36 @@ def test_result_batch_rejects_wrong_identity_shape_or_dtype(
         replace(_batch(), **{field: value})
 
 
+def test_result_batch_requires_nan_in_every_invalid_observed_and_physical_cell() -> (
+    None
+):
+    observed_batch = _batch((90,))
+    observed = observed_batch.observed_phase_velocity.copy()
+    observed_mask = observed_batch.valid_mask.copy()
+    observed[0, 3, 119] = np.inf
+    observed_mask[0, 3, 119] = False
+    with pytest.raises(ValueError, match="invalid observed.*NaN"):
+        replace(
+            observed_batch,
+            observed_phase_velocity=observed,
+            valid_mask=observed_mask,
+        )
+
+    physical_batch = _deep_batch()
+    assert physical_batch.physical_phase_velocity is not None
+    assert physical_batch.physical_valid_mask is not None
+    physical = physical_batch.physical_phase_velocity.copy()
+    physical_mask = physical_batch.physical_valid_mask.copy()
+    physical[0, 3, 119] = -np.inf
+    physical_mask[0, 3, 119] = False
+    with pytest.raises(ValueError, match="invalid physical.*NaN"):
+        replace(
+            physical_batch,
+            physical_phase_velocity=physical,
+            physical_valid_mask=physical_mask,
+        )
+
+
 def test_result_batch_requires_all_deep_fields_with_consistent_start_count() -> None:
     with pytest.raises(ValueError, match="optional.*all"):
         replace(_batch(), ensemble_vs=np.ones((2, 3, 20), dtype=np.float32))

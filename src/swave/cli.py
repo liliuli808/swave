@@ -13,8 +13,10 @@ import numpy as np
 
 from .config import (
     DatasetConfig,
+    InversionConfig,
     TrainingConfig,
     load_dataset_config,
+    load_inversion_config,
     load_training_config,
 )
 from .dataset import generate_dataset
@@ -31,6 +33,30 @@ def _dataset_config(path: str | None) -> DatasetConfig:
 
 def _training_config(path: str | None) -> TrainingConfig:
     return load_training_config(path) if path else TrainingConfig()
+
+
+def _inversion_config(path: str | None) -> InversionConfig:
+    return load_inversion_config(path) if path else InversionConfig()
+
+
+def _json_default(value: object) -> object:
+    if isinstance(value, Path):
+        return value.as_posix()
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")
+
+
+def _print_json(value: object) -> None:
+    payload = asdict(value) if hasattr(value, "__dataclass_fields__") else value
+    print(
+        json.dumps(
+            payload,
+            indent=2,
+            allow_nan=False,
+            default=_json_default,
+        )
+    )
 
 
 def _generate(arguments: argparse.Namespace) -> int:
@@ -91,16 +117,12 @@ def _predict(arguments: argparse.Namespace) -> int:
         values = np.asarray(arguments.vs, dtype=np.float32)
     if values.size == 0:
         raise ValueError("provide 20 Vs values or --input-file")
-    predictor = ForwardPredictor.load(
-        arguments.checkpoint, device=arguments.device
-    )
+    predictor = ForwardPredictor.load(arguments.checkpoint, device=arguments.device)
     frequencies, curves = predictor.predict_with_frequencies(values)
     if arguments.output:
         output = Path(arguments.output)
         output.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
-            output, frequencies=frequencies, phase_velocity=curves
-        )
+        np.savez_compressed(output, frequencies=frequencies, phase_velocity=curves)
         print(output)
     else:
         print(
@@ -155,6 +177,52 @@ def _plot_history(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _invert(arguments: argparse.Namespace) -> int:
+    from .inversion_runner import run_inversion_experiment
+
+    config = _inversion_config(arguments.config)
+    overrides = {
+        name: value
+        for name, value in {
+            "dataset_config": (
+                Path(arguments.dataset_config) if arguments.dataset_config else None
+            ),
+            "dataset_dir": (
+                Path(arguments.dataset_dir) if arguments.dataset_dir else None
+            ),
+            "checkpoint": (
+                Path(arguments.checkpoint) if arguments.checkpoint else None
+            ),
+            "output_dir": (
+                Path(arguments.output_dir) if arguments.output_dir else None
+            ),
+            "device": arguments.device,
+            "workers": arguments.workers,
+            "task_index": arguments.task_index,
+            "task_count": arguments.task_count,
+        }.items()
+        if value is not None
+    }
+    manifest = run_inversion_experiment(
+        replace(config, **overrides), arguments.experiment
+    )
+    _print_json(manifest)
+    return 0
+
+
+def _inversion_report(arguments: argparse.Namespace) -> int:
+    from .inversion_report import build_inversion_report
+
+    summary = build_inversion_report(
+        Path(arguments.results_dir),
+        Path(arguments.dataset_dir),
+        Path(arguments.output_dir),
+        dataset_config=load_dataset_config(arguments.dataset_config),
+    )
+    _print_json(summary)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="swave",
@@ -179,9 +247,7 @@ def _build_parser() -> argparse.ArgumentParser:
     training.add_argument("--output-dir")
     training.add_argument("--epochs", type=int)
     training.add_argument("--num-workers", type=int)
-    training.add_argument(
-        "--device", choices=("auto", "cpu", "cuda", "mps")
-    )
+    training.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"))
     training.set_defaults(handler=_train)
 
     evaluation = subparsers.add_parser(
@@ -234,6 +300,32 @@ def _build_parser() -> argparse.ArgumentParser:
     history_plot.add_argument("--history", required=True)
     history_plot.add_argument("--output", required=True)
     history_plot.set_defaults(handler=_plot_history)
+
+    inversion = subparsers.add_parser(
+        "invert", help="run or resume full and deep inversion experiments"
+    )
+    inversion.add_argument("--config")
+    inversion.add_argument(
+        "--experiment", choices=("full", "deep", "both"), default="both"
+    )
+    inversion.add_argument("--dataset-config")
+    inversion.add_argument("--dataset-dir")
+    inversion.add_argument("--checkpoint")
+    inversion.add_argument("--output-dir")
+    inversion.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"))
+    inversion.add_argument("--workers", type=int)
+    inversion.add_argument("--task-index", type=int)
+    inversion.add_argument("--task-count", type=int)
+    inversion.set_defaults(handler=_invert)
+
+    inversion_report = subparsers.add_parser(
+        "inversion-report", help="validate inversion results and build the report"
+    )
+    inversion_report.add_argument("--dataset-config", default="configs/dataset.toml")
+    inversion_report.add_argument("--results-dir", default="results/inversion")
+    inversion_report.add_argument("--dataset-dir", default="data/production")
+    inversion_report.add_argument("--output-dir", default="results/inversion-report")
+    inversion_report.set_defaults(handler=_inversion_report)
     return parser
 
 
@@ -245,6 +337,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(error.code)
     try:
         return int(arguments.handler(arguments))
-    except (ArithmeticError, OSError, RuntimeError, ValueError) as error:
+    except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

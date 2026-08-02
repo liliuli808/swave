@@ -314,6 +314,8 @@ class ResultBatch:
             self.valid_mask, np.isfinite(self.observed_phase_velocity)
         ):
             raise ValueError("observed_phase_velocity and valid_mask disagree")
+        if not np.all(np.isnan(self.observed_phase_velocity[~self.valid_mask])):
+            raise ValueError("invalid observed phase velocities must be NaN")
         if np.any(self.observed_phase_velocity[self.valid_mask] <= 0):
             raise ValueError("valid observed phase velocities must be positive")
 
@@ -468,6 +470,10 @@ class ResultBatch:
             np.isfinite(self.physical_phase_velocity),
         ):
             raise ValueError("physical_phase_velocity and physical_valid_mask disagree")
+        if not np.all(
+            np.isnan(self.physical_phase_velocity[~self.physical_valid_mask])
+        ):
+            raise ValueError("invalid physical phase velocities must be NaN")
         if np.any(self.physical_phase_velocity[self.physical_valid_mask] <= 0):
             raise ValueError("valid physical phase velocities must be positive")
         physical_rows = np.any(self.physical_valid_mask.reshape(count, -1), axis=1)

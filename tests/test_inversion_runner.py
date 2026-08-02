@@ -671,6 +671,32 @@ def test_cpu_workers_submit_each_job_with_spawn_context(
     )
 
 
+def test_tiny_full_experiment_crosses_real_spawn_process_boundary(
+    tiny_complete_dataset: Path,
+    tiny_checkpoint: Path,
+    tmp_path: Path,
+) -> None:
+    config = replace(
+        _runnable_config(tiny_complete_dataset, tiny_checkpoint, tmp_path),
+        max_iterations=1,
+        workers=2,
+    )
+
+    manifest = run_inversion_experiment(config, "full")
+
+    assert manifest.complete
+    assert manifest.completed_jobs == (
+        "full-clean-shard-00000",
+        "full-noise_1pct-shard-00000",
+    )
+    for job in manifest.completed_jobs:
+        batch = validate_result_shard(
+            config.output_dir / f"{job}.h5", manifest=manifest
+        )
+        assert batch.sample_id.tolist() == [90, 91, 92, 93]
+        assert np.all(np.isfinite(batch.reference_vs))
+
+
 def test_cuda_rejects_multiple_workers_before_job_submission(
     monkeypatch,
     tiny_complete_dataset: Path,

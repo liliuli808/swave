@@ -245,7 +245,7 @@ def test_physical_metrics_mask_invalid_infinities_without_contamination() -> Non
     assert batch.physical_valid_mask is not None
     physical = batch.physical_phase_velocity.copy()
     physical_mask = batch.physical_valid_mask.copy()
-    physical[0, 0, 0] = np.inf
+    physical[0, 0, 0] = np.nan
     physical_mask[0, 0, 0] = False
     masked = replace(
         batch,
@@ -259,6 +259,41 @@ def test_physical_metrics_mask_invalid_infinities_without_contamination() -> Non
         "missing_fraction"
     ] == pytest.approx(1.0 / (4 * 4 * 120))
     assert metrics["physical_frequency"]["overall"]["mae_km_s"] == pytest.approx(0.1)
+
+
+def test_representative_plot_uses_validated_physical_frequency_grid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    truth = np.linspace(0.5, 1.5, 20, dtype=np.float32).reshape(1, 20)
+    rows = report_module._rows_from_batch(
+        _result_batch(
+            truth,
+            offset=0.05,
+            deep=True,
+            sample_ids=np.array([90], dtype=np.uint64),
+            model_kinds=np.array([0], dtype=np.uint8),
+        ),
+        truth,
+        "clean",
+    )
+    frequencies = np.linspace(10.0, 129.0, 120)
+    captured: dict[str, object] = {}
+
+    def capture(figure, output_dir: Path, name: str) -> None:
+        captured["xdata"] = figure.axes[1].lines[0].get_xdata().copy()
+        captured["xlabel"] = figure.axes[1].get_xlabel()
+        report_module.plt.close(figure)
+
+    monkeypatch.setattr(report_module, "_save_figure", capture)
+
+    report_module._plot_representative(rows, tmp_path, "normal", "clean", frequencies)
+
+    np.testing.assert_array_equal(captured["xdata"], frequencies)
+    assert captured["xlabel"] == "Frequency (Hz)"
+    with pytest.raises(ValueError, match="frequencies.*120"):
+        report_module._plot_representative(
+            rows, tmp_path, "normal", "clean", frequencies[:-1]
+        )
 
 
 def test_clean_noisy_deltas_use_paired_successes_for_every_metric() -> None:
