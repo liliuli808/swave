@@ -16,6 +16,17 @@ from .network import FourHeadForwardModel
 from .splits import validate_checkpoint_split_policy
 
 
+def resolve_inversion_device(requested: str) -> torch.device:
+    """Resolve a device that supports the inversion's required float64 math."""
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+    if requested == "mps":
+        raise ValueError("MPS cannot be used for inversion because float64 is required")
+    return resolve_device(requested)
+
+
 @dataclass(frozen=True)
 class ReferenceModel:
     """Observation-derived reference model and its local optimization bounds."""
@@ -202,6 +213,10 @@ class DifferentiableSurrogate:
 
     def __post_init__(self) -> None:
         self.device = torch.device(self.device)
+        if self.device.type == "mps":
+            raise ValueError(
+                "MPS cannot be used for inversion because float64 is required"
+            )
         self.model.to(device=self.device, dtype=torch.float64)
         self.model.eval()
         self.input_mean = self._normalizer(self.input_mean, (20,), "input_mean")
@@ -229,7 +244,7 @@ class DifferentiableSurrogate:
         cls, checkpoint: Path | str, device: str = "auto"
     ) -> DifferentiableSurrogate:
         """Load a split-compatible four-head checkpoint in double precision."""
-        selected_device = resolve_device(device)
+        selected_device = resolve_inversion_device(device)
         payload = torch.load(
             Path(checkpoint),
             map_location=selected_device,

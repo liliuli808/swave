@@ -7,6 +7,8 @@ import pytest
 import torch
 from torch import Tensor, nn
 
+import swave.inversion as inversion_module
+from swave.inference import resolve_device
 from swave.inversion import (
     DifferentiableSurrogate,
     SurrogateObjective,
@@ -241,3 +243,22 @@ def test_differentiable_surrogate_loads_double_checkpoint(
     prediction = surrogate.predict_tensor(torch.ones(20, dtype=torch.float64))
     assert prediction.shape == (4, 120)
     assert prediction.requires_grad
+
+
+def test_inversion_auto_uses_cpu_when_only_mps_is_available(monkeypatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+
+    assert resolve_device("auto") == torch.device("mps")
+    assert inversion_module.resolve_inversion_device("auto") == torch.device("cpu")
+
+
+def test_inversion_rejects_mps_before_loading_checkpoint(monkeypatch) -> None:
+    def fail_checkpoint_load(*args, **kwargs):
+        raise AssertionError("checkpoint loading must not begin for MPS")
+
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    monkeypatch.setattr(torch, "load", fail_checkpoint_load)
+
+    with pytest.raises(ValueError, match="MPS.*float64"):
+        DifferentiableSurrogate.load(Path("unused.pt"), "mps")
