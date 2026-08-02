@@ -23,6 +23,7 @@ from swave.config import load_dataset_config
 from swave.dataset import validate_dataset_files
 from swave.geology import ModelKind
 from swave.inference import ForwardPredictor
+from swave.splits import mask_for_split
 
 
 def plot_comparison(
@@ -160,7 +161,7 @@ def _load_sample(
             if sample_id is None:
                 rows = np.flatnonzero(
                     (kinds == int(ModelKind.COUPLED))
-                    & ((sample_ids % 100) >= 95)
+                    & mask_for_split(sample_ids, "test")
                 )
             else:
                 rows = np.flatnonzero(sample_ids == sample_id)

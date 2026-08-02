@@ -67,7 +67,7 @@ def test_load_sample_selects_coupled_test_row_or_requested_id(
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
     with h5py.File(dataset_dir / "shard-00000.h5", "w") as handle:
-        handle.create_dataset("sample_id", data=[94, 95, 96], dtype="u8")
+        handle.create_dataset("sample_id", data=[84, 85, 86], dtype="u8")
         handle.create_dataset("model_kind", data=[3, 0, 3], dtype="u1")
         handle.create_dataset(
             "vs", data=np.ones((3, 20), dtype=np.float32), dtype="f4"
@@ -84,10 +84,10 @@ def test_load_sample_selects_coupled_test_row_or_requested_id(
         )
 
     automatic = module._load_sample(dataset_dir, None)
-    requested = module._load_sample(dataset_dir, 94)
+    requested = module._load_sample(dataset_dir, 84)
 
-    assert automatic[:2] == (96, "COUPLED")
-    assert requested[:2] == (94, "COUPLED")
+    assert automatic[:2] == (86, "COUPLED")
+    assert requested[:2] == (84, "COUPLED")
 
 
 def test_validate_inputs_rejects_checkpoint_from_other_dataset(

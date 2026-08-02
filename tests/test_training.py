@@ -6,9 +6,11 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pytest
+import torch
 
 from swave.config import TrainingConfig
 from swave.inference import ForwardPredictor
+from swave.splits import SPLIT_POLICY
 from swave.training import (
     HDF5ShardDataset,
     compute_normalization,
@@ -19,7 +21,9 @@ from swave.training import (
 
 def _write_tiny_dataset(directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
-    sample_ids = np.array([0, 1, 2, 3, 90, 91, 95, 96], dtype=np.uint64)
+    sample_ids = np.array(
+        [0, 1, 2, 3, 80, 81, 85, 86, 90, 91], dtype=np.uint64
+    )
     rng = np.random.default_rng(4)
     vs = rng.uniform(0.4, 2.0, size=(len(sample_ids), 20)).astype("f4")
     frequencies = np.arange(120, dtype=np.float32)
@@ -69,7 +73,13 @@ def test_split_dataset_and_normalization_use_training_rows_only(
     training = HDF5ShardDataset(tmp_path, split="train")
     validation = HDF5ShardDataset(tmp_path, split="validation")
     testing = HDF5ShardDataset(tmp_path, split="test")
-    assert (len(training), len(validation), len(testing)) == (4, 2, 2)
+    inversion = HDF5ShardDataset(tmp_path, split="inversion")
+    assert (len(training), len(validation), len(testing), len(inversion)) == (
+        4,
+        2,
+        2,
+        2,
+    )
     _, target, mask = training[0]
     assert np.all(np.isfinite(target.numpy()))
     assert not mask[3, 0]
@@ -99,6 +109,8 @@ def test_one_epoch_produces_loadable_checkpoint(tmp_path: Path) -> None:
     history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
     assert len(history["epochs"]) == 1
     assert np.isfinite(history["epochs"][0]["training_loss"])
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    assert payload["split_policy"] == SPLIT_POLICY
     with pytest.raises(ValueError, match="training configuration"):
         train(
             replace(
@@ -118,6 +130,30 @@ def test_one_epoch_produces_loadable_checkpoint(tmp_path: Path) -> None:
     metrics = evaluate(checkpoint, data_dir, device="cpu")
     assert metrics["mode_0"]["valid_count"] == 240
     assert metrics["mode_0"]["mae_km_s"] >= 0
+
+
+def test_evaluation_rejects_checkpoint_with_different_split_policy(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    _write_tiny_dataset(data_dir)
+    checkpoint = train(
+        replace(
+            TrainingConfig(),
+            dataset_dir=data_dir,
+            output_dir=tmp_path / "run",
+            batch_size=2,
+            epochs=1,
+            num_workers=0,
+            device="cpu",
+        )
+    )
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload["split_policy"] = "mod100-v1-90-5-5"
+    torch.save(payload, checkpoint)
+
+    with pytest.raises(ValueError, match="split policy"):
+        evaluate(checkpoint, data_dir, device="cpu")
 
 
 def test_training_rejects_incomplete_manifest(tmp_path: Path) -> None:

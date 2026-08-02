@@ -8,7 +8,6 @@ import random
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import h5py
 import numpy as np
@@ -20,8 +19,7 @@ from .config import TrainingConfig
 from .dataset import validate_dataset_files
 from .inference import ForwardPredictor, resolve_device
 from .network import FourHeadForwardModel, masked_smooth_l1
-
-Split = Literal["train", "validation", "test"]
+from .splits import SPLIT_POLICY, Split, mask_for_split
 
 
 @dataclass(frozen=True)
@@ -35,11 +33,9 @@ class Normalization:
 class HDF5ShardDataset(
     Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
 ):
-    """Map-style row index over deterministic train/validation/test shards."""
+    """Map-style row index over deterministic dataset shards."""
 
     def __init__(self, dataset_dir: Path | str, split: Split = "train") -> None:
-        if split not in {"train", "validation", "test"}:
-            raise ValueError("split must be train, validation, or test")
         self.dataset_dir = Path(dataset_dir)
         self.split = split
         self.entries: list[tuple[Path, int]] = []
@@ -47,13 +43,7 @@ class HDF5ShardDataset(
         for path in sorted(self.dataset_dir.glob("shard-*.h5")):
             with h5py.File(path, "r") as handle:
                 sample_ids = np.asarray(handle["sample_id"], dtype=np.uint64)
-            remainder = sample_ids % 100
-            if split == "train":
-                selected = remainder < 90
-            elif split == "validation":
-                selected = (remainder >= 90) & (remainder < 95)
-            else:
-                selected = remainder >= 95
+            selected = mask_for_split(sample_ids, split)
             self.entries.extend(
                 (path, int(row)) for row in np.flatnonzero(selected)
             )
@@ -213,6 +203,7 @@ def _checkpoint_payload(
         "target_mean": normalization.target_mean,
         "target_std": normalization.target_std,
         "dataset_config_hash": dataset_hash,
+        "split_policy": SPLIT_POLICY,
         "training_config": config.to_dict(),
         "torch_rng_state": torch.get_rng_state(),
         "numpy_rng_state": np.random.get_state(),
@@ -393,6 +384,8 @@ def evaluate(
     )
     if payload.get("dataset_config_hash") != manifest.config_hash:
         raise ValueError("checkpoint dataset configuration hash does not match")
+    if payload.get("split_policy") != SPLIT_POLICY:
+        raise ValueError("checkpoint split policy does not match")
     predictor = ForwardPredictor.load(checkpoint, device=device)
     dataset = HDF5ShardDataset(dataset_path, "test")
     if not dataset:
