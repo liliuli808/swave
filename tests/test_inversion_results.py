@@ -67,6 +67,14 @@ def _deep_batch() -> ResultBatch:
     )
 
 
+def _deep_config(minimum_valid_solutions: int = 2) -> InversionConfig:
+    return replace(
+        InversionConfig(),
+        initial_models=3,
+        minimum_valid_solutions=minimum_valid_solutions,
+    )
+
+
 @pytest.fixture
 def checkpoint(tmp_path: Path) -> Path:
     path = tmp_path / "best.pt"
@@ -130,6 +138,75 @@ def test_manifest_can_derive_scientific_identity_without_operational_controls(
 
     assert first == second
     assert first.inversion_config_hash == inversion_identity_hash(config)
+
+
+def test_full_identity_is_same_for_config_and_precomputed_hash_routes(
+    tmp_path: Path, checkpoint: Path
+) -> None:
+    config = InversionConfig()
+    first = initialize_result_manifest(
+        tmp_path / "results",
+        dataset_config_hash="a" * 64,
+        checkpoint=checkpoint,
+        config=config,
+        experiment="full",
+        expected_jobs=(JOB_A,),
+    )
+    second = initialize_result_manifest(
+        tmp_path / "results",
+        dataset_config_hash="a" * 64,
+        checkpoint=checkpoint,
+        inversion_config_hash=inversion_identity_hash(config),
+        experiment="full",
+        expected_jobs=(JOB_A,),
+    )
+
+    assert first == second
+    assert first.minimum_valid_solutions is None
+
+
+@pytest.mark.parametrize("experiment", ["deep", "both"])
+def test_deep_capable_identity_rejects_unverifiable_precomputed_hash(
+    tmp_path: Path, checkpoint: Path, experiment: str
+) -> None:
+    jobs = (
+        ("deep-clean-shard-00000",)
+        if experiment == "deep"
+        else (JOB_A, "deep-clean-shard-00000")
+    )
+    with pytest.raises(ValueError, match="config.*required|precomputed"):
+        initialize_result_manifest(
+            tmp_path / experiment,
+            dataset_config_hash="a" * 64,
+            checkpoint=checkpoint,
+            inversion_config_hash="b" * 64,
+            minimum_valid_solutions=2,
+            experiment=experiment,
+            expected_jobs=jobs,
+        )
+
+
+def test_both_identity_uses_one_deep_minimum_and_full_job_ignores_it(
+    tmp_path: Path, checkpoint: Path
+) -> None:
+    deep_job = "deep-clean-shard-00000"
+    manifest = initialize_result_manifest(
+        tmp_path,
+        dataset_config_hash="a" * 64,
+        checkpoint=checkpoint,
+        config=_deep_config(),
+        experiment="both",
+        expected_jobs=(JOB_A, deep_job),
+    )
+
+    assert manifest.minimum_valid_solutions == 2
+    write_result_shard(tmp_path, JOB_A, _batch(), manifest)
+    write_result_shard(tmp_path, deep_job, _deep_batch(), manifest)
+    mark_job_complete(tmp_path, JOB_A)
+    completed = mark_job_complete(tmp_path, deep_job)
+
+    assert completed.complete
+    assert validate_complete_results(tmp_path) == completed
 
 
 @pytest.mark.parametrize(
@@ -248,8 +325,7 @@ def test_deep_result_fields_round_trip(tmp_path: Path, checkpoint: Path) -> None
         tmp_path,
         dataset_config_hash="a" * 64,
         checkpoint=checkpoint,
-        inversion_config_hash="b" * 64,
-        minimum_valid_solutions=2,
+        config=_deep_config(),
         experiment="deep",
         expected_jobs=("deep-clean-shard-00000",),
     )
@@ -271,8 +347,7 @@ def test_deep_job_rejects_a_full_style_result_batch(
         tmp_path,
         dataset_config_hash="a" * 64,
         checkpoint=checkpoint,
-        inversion_config_hash="b" * 64,
-        minimum_valid_solutions=2,
+        config=_deep_config(),
         experiment="deep",
         expected_jobs=(job,),
     )
@@ -285,12 +360,12 @@ def test_deep_success_must_meet_bound_minimum_valid_solutions(
     tmp_path: Path, checkpoint: Path
 ) -> None:
     job = "deep-clean-shard-00000"
+    config = _deep_config()
     manifest = initialize_result_manifest(
         tmp_path,
         dataset_config_hash="a" * 64,
         checkpoint=checkpoint,
-        inversion_config_hash="b" * 64,
-        minimum_valid_solutions=2,
+        config=config,
         experiment="deep",
         expected_jobs=(job,),
     )
@@ -310,8 +385,7 @@ def test_deep_success_must_meet_bound_minimum_valid_solutions(
             tmp_path,
             dataset_config_hash="a" * 64,
             checkpoint=checkpoint,
-            inversion_config_hash="b" * 64,
-            minimum_valid_solutions=3,
+            config=replace(config, minimum_valid_solutions=3),
             experiment="deep",
             expected_jobs=(job,),
         )
@@ -322,7 +396,7 @@ def test_deep_success_must_meet_bound_minimum_valid_solutions(
 def test_deep_minimum_is_derived_from_and_bound_to_inversion_config(
     tmp_path: Path, checkpoint: Path
 ) -> None:
-    config = replace(InversionConfig(), initial_models=3, minimum_valid_solutions=2)
+    config = _deep_config()
     job = "deep-clean-shard-00000"
     manifest = initialize_result_manifest(
         tmp_path,
@@ -355,8 +429,7 @@ def test_insufficient_valid_solutions_code_requires_too_few_inliers(
         tmp_path,
         dataset_config_hash="a" * 64,
         checkpoint=checkpoint,
-        inversion_config_hash="b" * 64,
-        minimum_valid_solutions=2,
+        config=_deep_config(),
         experiment="deep",
         expected_jobs=(job,),
     )
@@ -379,8 +452,7 @@ def test_insufficient_valid_solutions_cannot_publish_arbitrary_summary(
         tmp_path,
         dataset_config_hash="a" * 64,
         checkpoint=checkpoint,
-        inversion_config_hash="b" * 64,
-        minimum_valid_solutions=2,
+        config=_deep_config(),
         experiment="deep",
         expected_jobs=(job,),
     )
@@ -459,6 +531,27 @@ def test_duplicate_expected_jobs_are_rejected(tmp_path: Path, checkpoint: Path) 
             inversion_config_hash="b" * 64,
             experiment="full",
             expected_jobs=(JOB_A, JOB_A),
+        )
+
+
+@pytest.mark.parametrize(
+    ("experiment", "job"),
+    [
+        ("deep", JOB_A),
+        ("full", "deep-clean-shard-00000"),
+    ],
+)
+def test_manifest_experiment_rejects_contradictory_job_prefix(
+    tmp_path: Path, checkpoint: Path, experiment: str, job: str
+) -> None:
+    with pytest.raises(ValueError, match="experiment.*job|job.*experiment"):
+        initialize_result_manifest(
+            tmp_path / experiment,
+            dataset_config_hash="a" * 64,
+            checkpoint=checkpoint,
+            config=InversionConfig(),
+            experiment=experiment,
+            expected_jobs=(job,),
         )
 
 

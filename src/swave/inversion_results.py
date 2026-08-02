@@ -87,6 +87,14 @@ def _require_job_name(value: object) -> str:
     return value
 
 
+def _job_experiment(job: str) -> str:
+    if job.startswith("full-"):
+        return "full"
+    if job.startswith("deep-"):
+        return "deep"
+    raise ValueError("job name must start with full- or deep-")
+
+
 def _require_array(
     value: object,
     name: str,
@@ -172,6 +180,10 @@ class ResultManifest:
             or self.minimum_valid_solutions <= 0
         ):
             raise ValueError("minimum_valid_solutions must be a positive integer")
+        if self.experiment == "full" and self.minimum_valid_solutions is not None:
+            raise ValueError(
+                "full result identity requires minimum_valid_solutions to be None"
+            )
         if self.experiment in {"deep", "both"} and self.minimum_valid_solutions is None:
             raise ValueError("deep result identity requires minimum_valid_solutions")
         if not isinstance(self.expected_jobs, tuple) or not self.expected_jobs:
@@ -182,6 +194,14 @@ class ResultManifest:
         completed = tuple(_require_job_name(job) for job in self.completed_jobs)
         if len(set(expected)) != len(expected):
             raise ValueError("expected_jobs contains duplicate jobs")
+        job_experiments = {_job_experiment(job) for job in expected}
+        allowed_job_experiments = (
+            {"full", "deep"} if self.experiment == "both" else {self.experiment}
+        )
+        if not job_experiments <= allowed_job_experiments:
+            raise ValueError(
+                "result manifest experiment and expected job prefixes disagree"
+            )
         if len(set(completed)) != len(completed):
             raise ValueError("completed_jobs contains duplicate jobs")
         if any(job not in expected for job in completed):
@@ -645,9 +665,14 @@ def initialize_result_manifest(
     """Create or safely resume the exact scientific result identity."""
     directory = _result_directory(results_dir, create=True)
     _require_hash(dataset_config_hash, "dataset_config_hash")
-    if (inversion_config_hash is None) == (config is None):
-        raise ValueError("provide exactly one of inversion_config_hash or config")
-    if config is not None:
+    if experiment not in {"full", "deep", "both"}:
+        raise ValueError("experiment must be full, deep, or both")
+    if experiment in {"deep", "both"}:
+        if config is None or inversion_config_hash is not None:
+            raise ValueError(
+                "config is required for deep-capable result identity; "
+                "a precomputed hash cannot verify minimum_valid_solutions"
+            )
         config_digest = inversion_identity_hash(config)
         if (
             minimum_valid_solutions is not None
@@ -656,8 +681,18 @@ def initialize_result_manifest(
             raise ValueError("minimum_valid_solutions does not match inversion config")
         configured_minimum = config.minimum_valid_solutions
     else:
-        config_digest = _require_hash(inversion_config_hash, "inversion_config_hash")
-        configured_minimum = minimum_valid_solutions
+        if (inversion_config_hash is None) == (config is None):
+            raise ValueError("provide exactly one of inversion_config_hash or config")
+        if minimum_valid_solutions is not None:
+            raise ValueError(
+                "full result identity requires minimum_valid_solutions to be None"
+            )
+        config_digest = (
+            inversion_identity_hash(config)
+            if config is not None
+            else _require_hash(inversion_config_hash, "inversion_config_hash")
+        )
+        configured_minimum = None
     assert config_digest is not None
     checkpoint_digest = checkpoint_sha256(checkpoint)
     candidate = ResultManifest(
@@ -790,13 +825,14 @@ def _validate_shard_identity(
 
 
 def _job_requires_deep_schema(job: str, manifest: ResultManifest | None) -> bool:
-    if job.startswith("deep-"):
-        return True
-    if job.startswith("full-"):
-        return False
-    if manifest is not None and manifest.experiment in {"deep", "full"}:
-        return manifest.experiment == "deep"
-    raise ValueError("job name does not identify a full or deep result schema")
+    job_experiment = _job_experiment(job)
+    if manifest is not None:
+        allowed = (
+            {"full", "deep"} if manifest.experiment == "both" else {manifest.experiment}
+        )
+        if job_experiment not in allowed:
+            raise ValueError("result manifest experiment and job schema disagree")
+    return job_experiment == "deep"
 
 
 def _validate_batch_schema_for_job(
