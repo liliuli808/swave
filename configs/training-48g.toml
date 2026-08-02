@@ -1,5 +1,5 @@
 [training]
-dataset_dir = "data/production"
+dataset_dir = "data/production-w64"
 output_dir = "runs/production-48g"
 batch_size = 8192
 epochs = 300

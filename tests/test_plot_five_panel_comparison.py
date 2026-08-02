@@ -130,9 +130,51 @@ def test_validate_inputs_rejects_checkpoint_from_other_dataset(
         module._validate_inputs(dataset_dir, checkpoint)
 
 
+def test_load_family_samples_selects_one_test_row_per_kind(
+    tmp_path: Path,
+) -> None:
+    module = _load_script()
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    with h5py.File(dataset_dir / "shard-00000.h5", "w") as handle:
+        handle.create_dataset(
+            "sample_id", data=[10, 95, 96, 97, 98], dtype="u8"
+        )
+        handle.create_dataset(
+            "model_kind", data=[0, 0, 1, 2, 3], dtype="u1"
+        )
+        handle.create_dataset(
+            "vs", data=np.ones((5, 20), dtype=np.float32), dtype="f4"
+        )
+        handle.create_dataset(
+            "phase_velocity",
+            data=np.ones((5, 4, 120), dtype=np.float32),
+            dtype="f4",
+        )
+        handle.create_dataset(
+            "valid_mask",
+            data=np.ones((5, 4, 120), dtype=np.bool_),
+            dtype="?",
+        )
+
+    selected = module._load_family_samples(dataset_dir)
+
+    assert set(selected) == {
+        "NORMAL",
+        "LOW_VELOCITY",
+        "HIGH_VELOCITY",
+        "COUPLED",
+    }
+    assert selected["NORMAL"][0] == 95  # 跳过训练折样本 10
+    assert selected["LOW_VELOCITY"][0] == 96
+    assert selected["HIGH_VELOCITY"][0] == 97
+    assert selected["COUPLED"][0] == 98
+
+
 def test_argument_parser_defaults_to_automatic_device() -> None:
     module = _load_script()
 
     arguments = module._parse_arguments([])
 
     assert arguments.device == "auto"
+    assert arguments.per_family is False

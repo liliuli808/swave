@@ -181,6 +181,44 @@ def _load_sample(
     raise ValueError(f"sample {sample_id} was not found in {dataset_dir}")
 
 
+def _load_family_samples(
+    dataset_dir: Path,
+) -> dict[str, tuple[int, str, NDArray[np.float32], NDArray[np.float32], NDArray[np.bool_]]]:
+    """Collect the first test-split (fold >= 95) sample of every family."""
+    selected: dict[
+        str, tuple[int, str, NDArray[np.float32], NDArray[np.float32], NDArray[np.bool_]]
+    ] = {}
+    for shard_path in sorted(dataset_dir.glob("shard-*.h5")):
+        with h5py.File(shard_path, "r") as handle:
+            sample_ids = np.asarray(handle["sample_id"], dtype=np.uint64)
+            kinds = np.asarray(handle["model_kind"], dtype=np.uint8)
+            folds = sample_ids % 100
+            for kind in ModelKind:
+                if kind.name in selected:
+                    continue
+                rows = np.flatnonzero(
+                    (kinds == int(kind)) & (folds >= 95)
+                )
+                if not rows.size:
+                    continue
+                row = int(rows[0])
+                selected[kind.name] = (
+                    int(sample_ids[row]),
+                    kind.name,
+                    np.asarray(handle["vs"][row], dtype=np.float32),
+                    np.asarray(
+                        handle["phase_velocity"][row], dtype=np.float32
+                    ),
+                    np.asarray(handle["valid_mask"][row], dtype=np.bool_),
+                )
+        if len(selected) == len(ModelKind):
+            break
+    missing = [kind.name for kind in ModelKind if kind.name not in selected]
+    if missing:
+        raise ValueError(f"no test-split sample found for families: {missing}")
+    return selected
+
+
 def _validate_inputs(dataset_dir: Path, checkpoint: Path) -> None:
     manifest = validate_dataset_files(dataset_dir)
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
@@ -210,6 +248,20 @@ def _parse_arguments(
     parser.add_argument("--config", default="configs/dataset.toml", type=Path)
     parser.add_argument("--sample-id", type=int)
     parser.add_argument(
+        "--per-family",
+        action="store_true",
+        help=(
+            "plot one figure per model family (first test-split sample each);"
+            " outputs are written as five-panel-<kind>.png under --output-dir"
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=Path("results"),
+        type=Path,
+        help="directory for --per-family outputs",
+    )
+    parser.add_argument(
         "--device",
         default="auto",
         choices=("auto", "cpu", "cuda", "mps"),
@@ -221,11 +273,47 @@ def main(arguments: Sequence[str] | None = None) -> None:
     arguments = _parse_arguments(arguments)
     _validate_inputs(arguments.dataset_dir, arguments.checkpoint)
     config = load_dataset_config(arguments.config)
-    sample_id, kind, vs, true_curves, valid_mask = _load_sample(
-        arguments.dataset_dir, arguments.sample_id
-    )
     predictor = ForwardPredictor.load(
         arguments.checkpoint, device=arguments.device
+    )
+
+    if arguments.per_family:
+        families = _load_family_samples(arguments.dataset_dir)
+        summaries = []
+        for kind_name, (sample_id, kind, vs, true_curves, valid_mask) in (
+            families.items()
+        ):
+            output = (
+                arguments.output_dir
+                / f"five-panel-{kind_name.lower().replace('_', '-')}.png"
+            )
+            frequencies, predictions = predictor.predict_with_frequencies(vs)
+            metrics = plot_comparison(
+                vs=vs,
+                true_curves=true_curves,
+                predicted_curves=predictions,
+                valid_mask=valid_mask,
+                frequencies=frequencies,
+                sample_id=sample_id,
+                model_kind=kind,
+                output=output,
+                thickness_km=config.geology.thickness_km,
+                anomaly_first_layer=config.geology.anomaly_first_layer,
+                anomaly_last_layer=config.geology.anomaly_last_layer,
+            )
+            summaries.append(
+                {
+                    "sample_id": sample_id,
+                    "model_kind": kind,
+                    "output": str(output),
+                    "modes": metrics,
+                }
+            )
+        print(json.dumps(summaries, indent=2))
+        return
+
+    sample_id, kind, vs, true_curves, valid_mask = _load_sample(
+        arguments.dataset_dir, arguments.sample_id
     )
     frequencies, predictions = predictor.predict_with_frequencies(vs)
     metrics = plot_comparison(
