@@ -23,7 +23,7 @@ def tiny_complete_dataset(tmp_path: Path) -> Path:
     model_kinds = np.array([0, 0, 1, 2, 3], dtype=np.uint8)
     vs = np.linspace(0.4, 2.0, 100, dtype=np.float32).reshape(5, 20)
     vp = vs + np.float32(0.5)
-    density = np.full((4, 20), 2.0, dtype=np.float32)
+    density = np.full((5, 20), 2.0, dtype=np.float32)
     phase_velocity = np.broadcast_to(
         np.arange(600, dtype=np.float32).reshape(5, 4, 30).repeat(4, axis=2),
         (5, 4, 120),

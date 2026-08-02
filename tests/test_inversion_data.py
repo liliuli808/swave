@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import h5py
 import pytest
 import torch
 
@@ -11,6 +12,22 @@ from swave.inversion_data import (
     select_deep_samples,
 )
 from swave.splits import SPLIT_POLICY
+
+
+def test_tiny_complete_dataset_matches_shard_row_schema(
+    tiny_complete_dataset: Path,
+) -> None:
+    """Fails if any declared sample field has a different row count."""
+    with h5py.File(tiny_complete_dataset / "shard-00000.h5") as handle:
+        assert handle["sample_id"].shape == (5,)
+        assert handle["model_kind"].shape == (5,)
+        assert handle["vs"].shape == (5, 20)
+        assert handle["vp"].shape == (5, 20)
+        assert handle["density"].shape == (5, 20)
+        assert handle["phase_velocity"].shape == (5, 4, 120)
+        assert handle["valid_mask"].shape == (5, 4, 120)
+        assert handle["quality_flags"].shape == (5,)
+        assert handle["retry_count"].shape == (5,)
 
 
 def test_optimizer_samples_exclude_true_vs(tiny_complete_dataset: Path) -> None:
