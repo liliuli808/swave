@@ -1,0 +1,22 @@
+[inversion]
+dataset_config = "configs/dataset.toml"
+dataset_dir = "data/production"
+checkpoint = "runs/production-48g/best.pt"
+output_dir = "results/inversion"
+mode_weights = [4.0, 1.0, 1.0, 1.0]
+regularization_lambda = 0.01
+regularization_type = "adaptive"
+vs_min = 0.3
+vs_max = 2.6
+vs_width = 0.7
+max_iterations = 100
+relative_tolerance = 0.00001
+initial_models = 100
+minimum_valid_solutions = 20
+samples_per_kind = 100
+noise_scenarios = ["clean", "noise_1pct"]
+seed = 20260727
+device = "auto"
+workers = 0
+task_index = 0
+task_count = 1

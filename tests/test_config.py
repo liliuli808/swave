@@ -5,9 +5,11 @@ import pytest
 from swave.config import (
     DatasetConfig,
     GeologyConfig,
+    InversionConfig,
     PhysicsConfig,
     canonical_hash,
     load_dataset_config,
+    load_inversion_config,
 )
 
 
@@ -43,3 +45,23 @@ def test_loads_production_config() -> None:
     assert cfg.samples == 1_000_000
     assert cfg.physics.mode_count == 4
     assert cfg.geology.layers == 20
+
+
+def test_inversion_defaults_match_approved_experiment() -> None:
+    """Catches an inversion run silently using unapproved scientific defaults."""
+    config = InversionConfig()
+    assert config.mode_weights == (4.0, 1.0, 1.0, 1.0)
+    assert config.noise_scenarios == ("clean", "noise_1pct")
+    assert config.initial_models == 100
+    assert config.samples_per_kind == 100
+    assert config.minimum_valid_solutions == 20
+
+
+def test_inversion_config_rejects_invalid_cluster_and_unknown_key(tmp_path) -> None:
+    """Catches invalid cluster partitions and misspelled TOML settings."""
+    with pytest.raises(ValueError, match="task_index"):
+        InversionConfig(task_index=2, task_count=2)
+    path = tmp_path / "bad.toml"
+    path.write_text("[inversion]\nunknown = 1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown inversion keys"):
+        load_inversion_config(path)

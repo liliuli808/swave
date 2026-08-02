@@ -10,7 +10,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -185,6 +185,79 @@ class TrainingConfig:
         return _plain(dataclasses.asdict(self))
 
 
+NoiseScenario = Literal["clean", "noise_1pct"]
+
+
+@dataclass(frozen=True)
+class InversionConfig:
+    """Scientific and execution controls for production inversion runs."""
+
+    dataset_config: Path = Path("configs/dataset.toml")
+    dataset_dir: Path = Path("data/production")
+    checkpoint: Path = Path("runs/production-48g/best.pt")
+    output_dir: Path = Path("results/inversion")
+    mode_weights: tuple[float, float, float, float] = (4.0, 1.0, 1.0, 1.0)
+    regularization_lambda: float = 1e-2
+    regularization_type: str = "adaptive"
+    vs_min: float = 0.3
+    vs_max: float = 2.6
+    vs_width: float = 0.7
+    max_iterations: int = 100
+    relative_tolerance: float = 1e-5
+    initial_models: int = 100
+    minimum_valid_solutions: int = 20
+    samples_per_kind: int = 100
+    noise_scenarios: tuple[NoiseScenario, ...] = ("clean", "noise_1pct")
+    seed: int = 20_260_727
+    device: str = "auto"
+    workers: int = 0
+    task_index: int = 0
+    task_count: int = 1
+
+    def __post_init__(self) -> None:
+        for name in ("dataset_config", "dataset_dir", "checkpoint", "output_dir"):
+            object.__setattr__(self, name, Path(getattr(self, name)))
+        if len(self.mode_weights) != 4 or any(value < 0 for value in self.mode_weights):
+            raise ValueError("mode_weights must contain four nonnegative values")
+        if not any(self.mode_weights):
+            raise ValueError("at least one mode weight must be positive")
+        if self.regularization_lambda < 0:
+            raise ValueError("regularization_lambda must be nonnegative")
+        if self.regularization_type not in {"adaptive", "first_order"}:
+            raise ValueError("regularization_type must be adaptive or first_order")
+        if not 0 < self.vs_min < self.vs_max or not 0 < self.vs_width <= self.vs_max - self.vs_min:
+            raise ValueError("Vs bounds and vs_width are invalid")
+        if self.max_iterations <= 0 or not 0 < self.relative_tolerance < 1:
+            raise ValueError("optimizer limits are invalid")
+        if self.initial_models <= 0 or not 1 <= self.minimum_valid_solutions <= self.initial_models:
+            raise ValueError("ensemble solution counts are invalid")
+        if self.samples_per_kind <= 0:
+            raise ValueError("samples_per_kind must be positive")
+        if not self.noise_scenarios or any(
+            value not in {"clean", "noise_1pct"} for value in self.noise_scenarios
+        ):
+            raise ValueError("noise_scenarios are invalid")
+        if self.device not in {"auto", "cpu", "cuda", "mps"} or self.workers < 0:
+            raise ValueError("device or workers is invalid")
+        if self.task_count <= 0 or not 0 <= self.task_index < self.task_count:
+            raise ValueError("task_index must be in [0, task_count)")
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> InversionConfig:
+        values = dict(mapping.get("inversion", mapping))
+        known_keys = {item.name for item in dataclasses.fields(cls)}
+        unknown_keys = set(values) - known_keys
+        if unknown_keys:
+            raise ValueError(f"unknown inversion keys: {sorted(unknown_keys)}")
+        for name in ("mode_weights", "noise_scenarios"):
+            if name in values:
+                values[name] = tuple(values[name])
+        return cls(**values)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _plain(dataclasses.asdict(self))
+
+
 def _plain(value: Any) -> Any:
     if isinstance(value, Path):
         return value.as_posix()
@@ -195,11 +268,22 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def canonical_hash(config: DatasetConfig | TrainingConfig) -> str:
+def canonical_hash(config: DatasetConfig | TrainingConfig | InversionConfig) -> str:
     payload = json.dumps(
         config.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def inversion_identity_hash(config: InversionConfig) -> str:
+    """Hash configuration while excluding per-task execution controls."""
+    payload = config.to_dict()
+    for name in ("device", "workers", "task_index", "task_count"):
+        del payload[name]
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def load_dataset_config(path: Path | str) -> DatasetConfig:
@@ -210,3 +294,8 @@ def load_dataset_config(path: Path | str) -> DatasetConfig:
 def load_training_config(path: Path | str) -> TrainingConfig:
     with Path(path).open("rb") as handle:
         return TrainingConfig.from_mapping(tomllib.load(handle))
+
+
+def load_inversion_config(path: Path | str) -> InversionConfig:
+    with Path(path).open("rb") as handle:
+        return InversionConfig.from_mapping(tomllib.load(handle))
