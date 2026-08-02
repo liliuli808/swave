@@ -261,6 +261,116 @@ def test_physical_metrics_mask_invalid_infinities_without_contamination() -> Non
     assert metrics["physical_frequency"]["overall"]["mae_km_s"] == pytest.approx(0.1)
 
 
+def test_clean_noisy_deltas_use_paired_successes_for_every_metric() -> None:
+    truth = np.ones((4, 20), dtype=np.float64)
+    base = report_module._rows_from_batch(
+        _result_batch(truth, offset=0.1, deep=True), truth, "clean"
+    )
+    clean_errors = np.array([1.1, 0.1, 0.4, 0.4], dtype=np.float32)
+    noisy_errors = np.array([0.4, 0.2, 0.2, 0.4], dtype=np.float32)
+    clean_success = np.array([True, True, False, False], dtype=np.bool_)
+    noisy_success = np.array([False, True, True, False], dtype=np.bool_)
+
+    def scenario_rows(
+        errors: np.ndarray,
+        success: np.ndarray,
+        noise: str,
+        *,
+        noisy_physical_gap: bool,
+    ) -> report_module._MetricRows:
+        recovered = np.asarray(truth + errors[:, None], dtype=np.float32)
+        curves = np.asarray(
+            np.ones((4, 4, 120), dtype=np.float32) + errors[:, None, None],
+            dtype=np.float32,
+        )
+        physical = curves.copy()
+        physical_mask = np.ones_like(physical, dtype=np.bool_)
+        if noisy_physical_gap:
+            physical[1, 0, 0] = np.inf
+            physical_mask[1, 0, 0] = False
+        p10 = np.asarray(recovered - 0.2, dtype=np.float32)
+        p90 = np.asarray(recovered + 0.2, dtype=np.float32)
+        if noise == "clean":
+            p10[1] = np.float32(0.9)
+            p90[1] = np.float32(1.1)
+        else:
+            p10[1] = np.float32(1.1)
+            p90[1] = np.float32(1.5)
+        failure_codes = np.where(success, b"", b"optimizer_failure").astype("S64")
+        return replace(
+            base,
+            success=success,
+            inverted_vs=recovered,
+            surrogate_phase_velocity=curves,
+            median_vs=recovered,
+            p10_vs=p10,
+            p90_vs=p90,
+            physical_phase_velocity=physical,
+            physical_valid_mask=physical_mask,
+            failure_code=failure_codes,
+            noise=np.full(4, noise, dtype="U10"),
+        )
+
+    clean = scenario_rows(
+        clean_errors, clean_success, "clean", noisy_physical_gap=False
+    )
+    noisy = scenario_rows(
+        noisy_errors, noisy_success, "noise_1pct", noisy_physical_gap=True
+    )
+
+    marginal_delta = (
+        report_module._compute_rows_metrics(noisy)["vs"]["mae_km_s"]
+        - report_module._compute_rows_metrics(clean)["vs"]["mae_km_s"]
+    )
+    delta = report_module._group_delta(clean, noisy)
+
+    assert marginal_delta == pytest.approx(-0.4)
+    assert delta["paired_sample_count"] == 4
+    assert delta["paired_successful_count"] == 1
+    assert delta["usable_counts"]["vs_rows"] == 1
+    assert delta["usable_counts"]["surrogate_frequency_values"]["overall"] == 480
+    assert delta["usable_counts"]["surrogate_frequency_rows"]["overall"] == 1
+    assert delta["usable_counts"]["physical_frequency_values"]["overall"] == 479
+    assert delta["usable_counts"]["physical_frequency_rows"]["overall"] == 1
+    assert delta["usable_counts"]["interval_rows"] == 1
+    assert delta["vs_mae_km_s"] == pytest.approx(0.1)
+    assert delta["vs"]["rmse_km_s"] == pytest.approx(0.1)
+    assert delta["surrogate_frequency_mae_km_s"] == pytest.approx(0.1)
+    assert delta["surrogate_frequency"]["mode_0"]["mae_km_s"] == pytest.approx(0.1)
+    assert delta["physical_frequency_mae_km_s"] == pytest.approx(0.1)
+    assert delta["physical_frequency"]["mode_0"]["mae_km_s"] == pytest.approx(0.1)
+    assert delta["interval_coverage_fraction"] == pytest.approx(-1.0)
+    assert delta["interval_width_km_s"] == pytest.approx(0.2)
+    assert delta["uncertainty"]["per_layer"]["coverage_fraction"] == pytest.approx(
+        [-1.0] * 20
+    )
+    assert "success_fraction" not in delta
+
+
+def test_clean_noisy_deltas_are_explicit_when_no_rows_succeed_in_both() -> None:
+    truth = np.ones((4, 20), dtype=np.float64)
+    base = report_module._rows_from_batch(
+        _result_batch(truth, offset=0.1, deep=False), truth, "clean"
+    )
+    clean = replace(base, success=np.array([True, False, False, False], dtype=np.bool_))
+    noisy = replace(
+        base,
+        success=np.array([False, True, False, False], dtype=np.bool_),
+        noise=np.full(4, "noise_1pct", dtype="U10"),
+    )
+
+    delta = report_module._group_delta(clean, noisy)
+
+    assert delta["paired_sample_count"] == 4
+    assert delta["paired_successful_count"] == 0
+    assert delta["usable_counts"]["vs_rows"] == 0
+    assert delta["usable_counts"]["surrogate_frequency_values"]["overall"] == 0
+    assert delta["usable_counts"]["surrogate_frequency_rows"]["overall"] == 0
+    assert delta["vs_mae_km_s"] is None
+    assert delta["surrogate_frequency_mae_km_s"] is None
+    assert delta["vs"]["per_layer"]["mae_km_s"] == [None] * 20
+
+
 def test_load_true_vs_reads_only_unique_requested_rows_in_requested_order(
     tmp_path: Path,
 ) -> None:

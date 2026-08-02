@@ -632,63 +632,254 @@ def _delta_value(noisy: Any, clean: Any) -> float | None:
     return float(noisy - clean)
 
 
+def _list_delta(noisy: list[Any], clean: list[Any]) -> list[float | None]:
+    if len(noisy) != len(clean):
+        raise ValueError("paired metric vectors have different lengths")
+    return [
+        _delta_value(noisy_value, clean_value)
+        for noisy_value, clean_value in zip(noisy, clean, strict=True)
+    ]
+
+
+def _vs_delta(clean: _MetricRows, noisy: _MetricRows) -> tuple[dict[str, Any], float]:
+    clean_metrics = compute_vs_metrics(clean.truth_vs, clean.inverted_vs)
+    noisy_metrics = compute_vs_metrics(noisy.truth_vs, noisy.inverted_vs)
+    scalar_names = (
+        "mae_km_s",
+        "rmse_km_s",
+        "mean_relative_percent",
+        "p95_absolute_error_km_s",
+    )
+    result = {
+        name: _delta_value(noisy_metrics[name], clean_metrics[name])
+        for name in scalar_names
+    }
+    result["per_layer"] = {
+        name: _list_delta(
+            noisy_metrics["per_layer"][name], clean_metrics["per_layer"][name]
+        )
+        for name in ("mae_km_s", "bias_km_s")
+    }
+    clean_row_mae = np.mean(np.abs(clean.inverted_vs - clean.truth_vs), axis=1)
+    noisy_row_mae = np.mean(np.abs(noisy.inverted_vs - noisy.truth_vs), axis=1)
+    return result, float(np.mean(noisy_row_mae - clean_row_mae))
+
+
+def _frequency_usable_counts(mask: NDArray[np.bool_]) -> dict[str, int]:
+    counts = {"overall": int(np.count_nonzero(mask))}
+    counts.update(
+        {
+            f"mode_{mode}": int(np.count_nonzero(mask[:, mode]))
+            for mode in range(mask.shape[1])
+        }
+    )
+    return counts
+
+
+def _frequency_usable_row_counts(mask: NDArray[np.bool_]) -> dict[str, int]:
+    counts = {
+        "overall": int(
+            np.count_nonzero(np.any(mask.reshape(mask.shape[0], -1), axis=1))
+        )
+    }
+    counts.update(
+        {
+            f"mode_{mode}": int(np.count_nonzero(np.any(mask[:, mode], axis=1)))
+            for mode in range(mask.shape[1])
+        }
+    )
+    return counts
+
+
+def _frequency_delta(
+    clean_observed: NDArray[np.float32],
+    clean_predicted: NDArray[np.float32],
+    noisy_observed: NDArray[np.float32],
+    noisy_predicted: NDArray[np.float32],
+    common_mask: NDArray[np.bool_],
+) -> tuple[dict[str, Any], dict[str, int]]:
+    clean_metrics = compute_frequency_metrics(
+        clean_observed, clean_predicted, common_mask
+    )
+    noisy_metrics = compute_frequency_metrics(
+        noisy_observed, noisy_predicted, common_mask
+    )
+    result: dict[str, Any] = {}
+    for group in clean_metrics:
+        result[group] = {
+            name: _delta_value(noisy_metrics[group][name], clean_metrics[group][name])
+            for name in (
+                "mae_km_s",
+                "rmse_km_s",
+                "p95_absolute_error_km_s",
+            )
+        }
+    return result, _frequency_usable_counts(common_mask)
+
+
+def _interval_delta(clean: _MetricRows, noisy: _MetricRows) -> dict[str, Any]:
+    assert clean.p10_vs is not None
+    assert clean.p90_vs is not None
+    assert noisy.p10_vs is not None
+    assert noisy.p90_vs is not None
+    clean_metrics = compute_interval_metrics(clean.truth_vs, clean.p10_vs, clean.p90_vs)
+    noisy_metrics = compute_interval_metrics(noisy.truth_vs, noisy.p10_vs, noisy.p90_vs)
+    return {
+        "coverage_fraction": _delta_value(
+            noisy_metrics["coverage_fraction"], clean_metrics["coverage_fraction"]
+        ),
+        "mean_interval_width_km_s": _delta_value(
+            noisy_metrics["mean_interval_width_km_s"],
+            clean_metrics["mean_interval_width_km_s"],
+        ),
+        "per_layer": {
+            name: _list_delta(
+                noisy_metrics["per_layer"][name],
+                clean_metrics["per_layer"][name],
+            )
+            for name in ("coverage_fraction", "mean_interval_width_km_s")
+        },
+    }
+
+
+def _null_frequency_delta(mode_count: int) -> dict[str, Any]:
+    values = {
+        "mae_km_s": None,
+        "rmse_km_s": None,
+        "p95_absolute_error_km_s": None,
+    }
+    return {
+        "overall": dict(values),
+        **{f"mode_{mode}": dict(values) for mode in range(mode_count)},
+    }
+
+
+def _null_vs_delta() -> dict[str, Any]:
+    return {
+        "mae_km_s": None,
+        "rmse_km_s": None,
+        "mean_relative_percent": None,
+        "p95_absolute_error_km_s": None,
+        "per_layer": {
+            "mae_km_s": [None] * 20,
+            "bias_km_s": [None] * 20,
+        },
+    }
+
+
 def _group_delta(clean: _MetricRows, noisy: _MetricRows) -> dict[str, Any]:
     if not np.array_equal(clean.sample_id, noisy.sample_id):
         raise ValueError("clean and noisy rows are not paired by sample ID")
-    clean_metrics = _compute_rows_metrics(clean)
-    noisy_metrics = _compute_rows_metrics(noisy)
     paired = clean.success & noisy.success
     paired_count = int(np.count_nonzero(paired))
-    paired_delta = None
-    if paired_count:
-        clean_mae = np.mean(
-            np.abs(clean.inverted_vs[paired] - clean.truth_vs[paired]), axis=1
-        )
-        noisy_mae = np.mean(
-            np.abs(noisy.inverted_vs[paired] - noisy.truth_vs[paired]), axis=1
-        )
-        paired_delta = float(np.mean(noisy_mae - clean_mae))
-    result = {
+    mode_count = clean.observed_phase_velocity.shape[1]
+    result: dict[str, Any] = {
         "paired_sample_count": int(clean.sample_id.size),
         "paired_successful_count": paired_count,
-        "mean_paired_sample_vs_mae_delta_km_s": paired_delta,
-        "success_fraction": _delta_value(
-            noisy_metrics["convergence"]["success_fraction"],
-            clean_metrics["convergence"]["success_fraction"],
-        ),
-        "vs_mae_km_s": _delta_value(
-            noisy_metrics["vs"]["mae_km_s"], clean_metrics["vs"]["mae_km_s"]
-        ),
-        "vs_rmse_km_s": _delta_value(
-            noisy_metrics["vs"]["rmse_km_s"], clean_metrics["vs"]["rmse_km_s"]
-        ),
-        "surrogate_frequency_mae_km_s": _delta_value(
-            noisy_metrics["surrogate_frequency"]["overall"]["mae_km_s"],
-            clean_metrics["surrogate_frequency"]["overall"]["mae_km_s"],
+        "paired_policy": (
+            "noisy minus clean on rows successful in both scenarios; frequency "
+            "deltas additionally use cells valid in both scenarios"
         ),
     }
-    if "physical_frequency" in clean_metrics:
+    if paired_count == 0:
         result.update(
-            physical_frequency_mae_km_s=_delta_value(
-                noisy_metrics["physical_frequency"]["overall"]["mae_km_s"],
-                clean_metrics["physical_frequency"]["overall"]["mae_km_s"],
+            usable_counts={
+                "vs_rows": 0,
+                "surrogate_frequency_values": {
+                    "overall": 0,
+                    **{f"mode_{mode}": 0 for mode in range(mode_count)},
+                },
+                "surrogate_frequency_rows": {
+                    "overall": 0,
+                    **{f"mode_{mode}": 0 for mode in range(mode_count)},
+                },
+                **(
+                    {
+                        "physical_frequency_values": {
+                            "overall": 0,
+                            **{f"mode_{mode}": 0 for mode in range(mode_count)},
+                        },
+                        "physical_frequency_rows": {
+                            "overall": 0,
+                            **{f"mode_{mode}": 0 for mode in range(mode_count)},
+                        },
+                        "interval_rows": 0,
+                    }
+                    if clean.physical_phase_velocity is not None
+                    else {}
+                ),
+            },
+            mean_paired_sample_vs_mae_delta_km_s=None,
+            vs_mae_km_s=None,
+            vs_rmse_km_s=None,
+            surrogate_frequency_mae_km_s=None,
+            vs=_null_vs_delta(),
+            surrogate_frequency=_null_frequency_delta(mode_count),
+        )
+        if clean.physical_phase_velocity is not None:
+            result.update(
+                physical_frequency_mae_km_s=None,
+                interval_coverage_fraction=None,
+                interval_width_km_s=None,
+                physical_frequency=_null_frequency_delta(mode_count),
+                uncertainty=None,
+            )
+        return result
+
+    paired_clean = _select_rows(clean, paired)
+    paired_noisy = _select_rows(noisy, paired)
+    vs_delta, paired_sample_delta = _vs_delta(paired_clean, paired_noisy)
+    common_surrogate_mask = paired_clean.valid_mask & paired_noisy.valid_mask
+    surrogate_delta, surrogate_counts = _frequency_delta(
+        paired_clean.observed_phase_velocity,
+        paired_clean.surrogate_phase_velocity,
+        paired_noisy.observed_phase_velocity,
+        paired_noisy.surrogate_phase_velocity,
+        common_surrogate_mask,
+    )
+    result.update(
+        usable_counts={
+            "vs_rows": paired_count,
+            "surrogate_frequency_values": surrogate_counts,
+            "surrogate_frequency_rows": _frequency_usable_row_counts(
+                common_surrogate_mask
             ),
-            interval_coverage_fraction=_delta_value(
-                None
-                if noisy_metrics["uncertainty"] is None
-                else noisy_metrics["uncertainty"]["coverage_fraction"],
-                None
-                if clean_metrics["uncertainty"] is None
-                else clean_metrics["uncertainty"]["coverage_fraction"],
-            ),
-            interval_width_km_s=_delta_value(
-                None
-                if noisy_metrics["uncertainty"] is None
-                else noisy_metrics["uncertainty"]["mean_interval_width_km_s"],
-                None
-                if clean_metrics["uncertainty"] is None
-                else clean_metrics["uncertainty"]["mean_interval_width_km_s"],
-            ),
+        },
+        mean_paired_sample_vs_mae_delta_km_s=paired_sample_delta,
+        vs_mae_km_s=vs_delta["mae_km_s"],
+        vs_rmse_km_s=vs_delta["rmse_km_s"],
+        surrogate_frequency_mae_km_s=surrogate_delta["overall"]["mae_km_s"],
+        vs=vs_delta,
+        surrogate_frequency=surrogate_delta,
+    )
+    if paired_clean.physical_phase_velocity is not None:
+        assert paired_clean.physical_valid_mask is not None
+        assert paired_noisy.physical_phase_velocity is not None
+        assert paired_noisy.physical_valid_mask is not None
+        common_physical_mask = (
+            common_surrogate_mask
+            & paired_clean.physical_valid_mask
+            & paired_noisy.physical_valid_mask
+        )
+        physical_delta, physical_counts = _frequency_delta(
+            paired_clean.observed_phase_velocity,
+            paired_clean.physical_phase_velocity,
+            paired_noisy.observed_phase_velocity,
+            paired_noisy.physical_phase_velocity,
+            common_physical_mask,
+        )
+        uncertainty_delta = _interval_delta(paired_clean, paired_noisy)
+        result["usable_counts"].update(
+            physical_frequency_values=physical_counts,
+            physical_frequency_rows=_frequency_usable_row_counts(common_physical_mask),
+            interval_rows=paired_count,
+        )
+        result.update(
+            physical_frequency_mae_km_s=physical_delta["overall"]["mae_km_s"],
+            interval_coverage_fraction=uncertainty_delta["coverage_fraction"],
+            interval_width_km_s=uncertainty_delta["mean_interval_width_km_s"],
+            physical_frequency=physical_delta,
+            uncertainty=uncertainty_delta,
         )
     return result
 
