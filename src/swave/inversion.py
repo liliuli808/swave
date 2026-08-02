@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
+import scipy.optimize
 import torch
 from numpy.typing import ArrayLike, NDArray
 from torch import Tensor, nn
@@ -43,6 +45,45 @@ class ObjectiveTerms:
     total: float
     data_misfit: float
     regularization: float
+
+
+class InversionObjective(Protocol):
+    """Optimizer-facing objective contract independent of dataset truth."""
+
+    def value_and_grad(self, vs: ArrayLike) -> tuple[float, NDArray[np.float64]]: ...
+
+    def terms(self, vs: ArrayLike) -> ObjectiveTerms: ...
+
+    def predict(self, vs: ArrayLike) -> NDArray[np.float64]: ...
+
+
+@dataclass(frozen=True)
+class InversionRun:
+    """Diagnostics and recovered model from one bounded optimization run."""
+
+    vs: NDArray[np.float64]
+    predicted_phase_velocity: NDArray[np.float64]
+    success: bool
+    status: int
+    message: str
+    iterations: int
+    evaluations: int
+    initial_objective: float
+    terms: ObjectiveTerms
+
+
+@dataclass(frozen=True)
+class EnsembleResult:
+    """Ordered run diagnostics and robust statistics for a multi-start inversion."""
+
+    runs: tuple[InversionRun, ...]
+    inlier_mask: NDArray[np.bool_]
+    median_vs: NDArray[np.float64]
+    p10_vs: NDArray[np.float64]
+    p90_vs: NDArray[np.float64]
+    representative_terms: ObjectiveTerms
+    representative_prediction: NDArray[np.float64]
+    sufficient: bool
 
 
 def _smooth(values: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -418,3 +459,296 @@ class SurrogateObjective:
         if not bool(torch.isfinite(prediction).all()):
             raise ArithmeticError("surrogate prediction is non-finite")
         return np.asarray(prediction.detach().cpu().numpy(), dtype=np.float64).copy()
+
+
+def _model_vector(values: ArrayLike, name: str) -> NDArray[np.float64]:
+    array = np.asarray(values, dtype=np.float64)
+    if array.shape != (20,) or not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain 20 finite values")
+    return array.copy()
+
+
+def _optimizer_inputs(
+    initial: ArrayLike,
+    lower: ArrayLike,
+    upper: ArrayLike,
+    max_iterations: int,
+    relative_tolerance: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    initial_values = _model_vector(initial, "initial model")
+    lower_values = _model_vector(lower, "lower bounds")
+    upper_values = _model_vector(upper, "upper bounds")
+    if np.any(lower_values > upper_values):
+        raise ValueError("lower bounds must not exceed upper bounds")
+    if np.any(initial_values < lower_values) or np.any(initial_values > upper_values):
+        raise ValueError("initial model must lie within lower and upper bounds")
+    if isinstance(max_iterations, bool) or not isinstance(max_iterations, int):
+        raise TypeError("max_iterations must be a positive integer")
+    if max_iterations <= 0:
+        raise ValueError("max_iterations must be a positive integer")
+    if not np.isfinite(relative_tolerance) or not 0 < relative_tolerance < 1:
+        raise ValueError("relative_tolerance must be finite and in (0, 1)")
+    return initial_values, lower_values, upper_values
+
+
+def _finite_terms(terms: ObjectiveTerms, context: str) -> ObjectiveTerms:
+    values = np.array(
+        [terms.total, terms.data_misfit, terms.regularization], dtype=np.float64
+    )
+    if not np.all(np.isfinite(values)):
+        raise ArithmeticError(f"{context} objective terms are non-finite")
+    return ObjectiveTerms(*(float(value) for value in values))
+
+
+def _finite_prediction(
+    objective: InversionObjective, values: ArrayLike
+) -> NDArray[np.float64]:
+    prediction = np.asarray(objective.predict(values), dtype=np.float64)
+    if prediction.ndim != 2 or prediction.shape[0] != 4:
+        raise ValueError("objective prediction must have shape (4, frequency_count)")
+    if not np.all(np.isfinite(prediction)):
+        raise ArithmeticError("objective prediction is non-finite")
+    return prediction.copy()
+
+
+def invert_one(
+    objective: InversionObjective,
+    initial: ArrayLike,
+    lower: ArrayLike,
+    upper: ArrayLike,
+    *,
+    max_iterations: int,
+    relative_tolerance: float,
+) -> InversionRun:
+    """Run one strict bounded L-BFGS-B inversion with a validated callback."""
+    initial_values, lower_values, upper_values = _optimizer_inputs(
+        initial, lower, upper, max_iterations, relative_tolerance
+    )
+    initial_terms = _finite_terms(objective.terms(initial_values), "initial")
+
+    def value_and_grad(
+        values: NDArray[np.float64],
+    ) -> tuple[float, NDArray[np.float64]]:
+        value, gradient = objective.value_and_grad(values)
+        value_array = np.asarray(value, dtype=np.float64)
+        if value_array.shape != ():
+            raise ValueError("objective value must be scalar")
+        objective_value = float(value_array)
+        if not np.isfinite(objective_value):
+            raise ArithmeticError("objective value is non-finite")
+        gradient_values = np.asarray(gradient, dtype=np.float64)
+        if gradient_values.shape != (20,):
+            raise ValueError("objective gradient must contain 20 values")
+        if not np.all(np.isfinite(gradient_values)):
+            raise ArithmeticError("objective gradient is non-finite")
+        return objective_value, gradient_values
+
+    result = scipy.optimize.minimize(
+        value_and_grad,
+        initial_values,
+        method="L-BFGS-B",
+        jac=True,
+        bounds=list(zip(lower_values, upper_values, strict=True)),
+        options={"maxiter": max_iterations, "ftol": relative_tolerance},
+    )
+    recovered = np.asarray(result.x, dtype=np.float64)
+    if recovered.shape != (20,) or not np.all(np.isfinite(recovered)):
+        raise ArithmeticError("L-BFGS-B returned an invalid bounded model")
+    if np.any(recovered < lower_values) or np.any(recovered > upper_values):
+        raise ArithmeticError("L-BFGS-B returned an invalid bounded model")
+    terms = _finite_terms(objective.terms(recovered), "final")
+    prediction = _finite_prediction(objective, recovered)
+    return InversionRun(
+        vs=recovered.copy(),
+        predicted_phase_velocity=prediction,
+        success=bool(result.success),
+        status=int(result.status),
+        message=str(result.message),
+        iterations=int(result.nit),
+        evaluations=int(result.nfev),
+        initial_objective=initial_terms.total,
+        terms=terms,
+    )
+
+
+def iqr_inlier_mask(objectives: ArrayLike) -> NDArray[np.bool_]:
+    """Return finite objective values within the inclusive 1.5-IQR fences."""
+    values = np.asarray(objectives, dtype=np.float64)
+    if values.ndim != 1:
+        raise ValueError("objectives must be one-dimensional")
+    finite = np.isfinite(values)
+    keep = np.zeros(values.shape, dtype=np.bool_)
+    if not np.any(finite):
+        return keep
+    q1, q3 = np.percentile(values[finite], [25.0, 75.0])
+    iqr = q3 - q1
+    if iqr == 0.0:
+        keep[finite] = True
+        return keep
+    keep[finite] = (values[finite] >= q1 - 1.5 * iqr) & (
+        values[finite] <= q3 + 1.5 * iqr
+    )
+    return keep
+
+
+def _prediction_shape(
+    objective: InversionObjective, runs: list[InversionRun]
+) -> tuple[int, int]:
+    for run in runs:
+        if run.predicted_phase_velocity.ndim == 2:
+            shape = run.predicted_phase_velocity.shape
+            if shape[0] == 4 and shape[1] > 0:
+                return shape
+    frequencies = np.asarray(getattr(objective, "frequencies", ()))
+    if frequencies.ndim == 1 and frequencies.size > 0:
+        return (4, int(frequencies.size))
+    return (4, 0)
+
+
+def _complete_prediction_shape(
+    objective: InversionObjective,
+    runs: list[InversionRun],
+    starts: NDArray[np.float64],
+    lower: NDArray[np.float64],
+    upper: NDArray[np.float64],
+) -> tuple[int, int]:
+    shape = _prediction_shape(objective, runs)
+    if shape[1] > 0:
+        return shape
+    for initial in starts:
+        if (
+            not np.all(np.isfinite(initial))
+            or np.any(initial < lower)
+            or np.any(initial > upper)
+        ):
+            continue
+        try:
+            return _finite_prediction(objective, initial).shape
+        except (ArithmeticError, RuntimeError, ValueError):
+            continue
+    return shape
+
+
+def _failed_run(
+    objective: InversionObjective,
+    initial: NDArray[np.float64],
+    error: ArithmeticError | RuntimeError | ValueError,
+    prediction_shape: tuple[int, int],
+) -> InversionRun:
+    try:
+        initial_objective = _finite_terms(objective.terms(initial), "initial").total
+    except (ArithmeticError, RuntimeError, ValueError):
+        initial_objective = float("nan")
+    nan_terms = ObjectiveTerms(float("nan"), float("nan"), float("nan"))
+    return InversionRun(
+        vs=np.full(20, np.nan, dtype=np.float64),
+        predicted_phase_velocity=np.full(prediction_shape, np.nan, dtype=np.float64),
+        success=False,
+        status=-1,
+        message=f"{type(error).__name__}: {error}",
+        iterations=0,
+        evaluations=0,
+        initial_objective=initial_objective,
+        terms=nan_terms,
+    )
+
+
+def invert_ensemble(
+    objective: InversionObjective,
+    initial_models: ArrayLike,
+    lower: ArrayLike,
+    upper: ArrayLike,
+    *,
+    max_iterations: int,
+    relative_tolerance: float,
+    minimum_valid_solutions: int,
+) -> EnsembleResult:
+    """Run ordered starts independently and summarize successful finite inliers."""
+    starts = np.asarray(initial_models, dtype=np.float64)
+    if starts.ndim != 2 or starts.shape[1] != 20 or starts.shape[0] == 0:
+        raise ValueError("initial_models must have shape (start_count, 20)")
+    lower_values = _model_vector(lower, "lower bounds")
+    upper_values = _model_vector(upper, "upper bounds")
+    if np.any(lower_values > upper_values):
+        raise ValueError("lower bounds must not exceed upper bounds")
+    if (
+        isinstance(minimum_valid_solutions, bool)
+        or not isinstance(minimum_valid_solutions, int)
+        or not 1 <= minimum_valid_solutions <= starts.shape[0]
+    ):
+        raise ValueError(
+            "minimum_valid_solutions must be between one and the start count"
+        )
+
+    runs: list[InversionRun] = []
+    provisional_prediction_shape = _prediction_shape(objective, runs)
+    for initial in starts:
+        try:
+            run = invert_one(
+                objective,
+                initial,
+                lower_values,
+                upper_values,
+                max_iterations=max_iterations,
+                relative_tolerance=relative_tolerance,
+            )
+        except (ArithmeticError, RuntimeError, ValueError) as error:
+            run = _failed_run(objective, initial, error, provisional_prediction_shape)
+        runs.append(run)
+        provisional_prediction_shape = _prediction_shape(objective, runs)
+
+    prediction_shape = _complete_prediction_shape(
+        objective, runs, starts, lower_values, upper_values
+    )
+    runs = [
+        replace(
+            run,
+            predicted_phase_velocity=np.full(
+                prediction_shape, np.nan, dtype=np.float64
+            ),
+        )
+        if run.status == -1 and run.predicted_phase_velocity.shape != prediction_shape
+        else run
+        for run in runs
+    ]
+
+    objectives = np.full(len(runs), np.nan, dtype=np.float64)
+    successful = np.zeros(len(runs), dtype=np.bool_)
+    for index, run in enumerate(runs):
+        finite_solution = run.vs.shape == (20,) and np.all(np.isfinite(run.vs))
+        finite_objective = np.isfinite(run.terms.total)
+        if run.success and finite_solution and finite_objective:
+            successful[index] = True
+            objectives[index] = run.terms.total
+    inlier_mask = successful & iqr_inlier_mask(objectives)
+
+    nan_model = np.full(20, np.nan, dtype=np.float64)
+    nan_terms = ObjectiveTerms(float("nan"), float("nan"), float("nan"))
+    if np.count_nonzero(inlier_mask) < minimum_valid_solutions:
+        return EnsembleResult(
+            runs=tuple(runs),
+            inlier_mask=inlier_mask,
+            median_vs=nan_model.copy(),
+            p10_vs=nan_model.copy(),
+            p90_vs=nan_model.copy(),
+            representative_terms=nan_terms,
+            representative_prediction=np.full(
+                prediction_shape, np.nan, dtype=np.float64
+            ),
+            sufficient=False,
+        )
+
+    solutions = np.stack([run.vs for run in runs], axis=0)[inlier_mask]
+    p10, median, p90 = np.percentile(solutions, [10.0, 50.0, 90.0], axis=0)
+    representative_terms = _finite_terms(objective.terms(median), "representative")
+    representative_prediction = _finite_prediction(objective, median)
+    return EnsembleResult(
+        runs=tuple(runs),
+        inlier_mask=inlier_mask,
+        median_vs=np.asarray(median, dtype=np.float64),
+        p10_vs=np.asarray(p10, dtype=np.float64),
+        p90_vs=np.asarray(p90, dtype=np.float64),
+        representative_terms=representative_terms,
+        representative_prediction=representative_prediction,
+        sufficient=True,
+    )

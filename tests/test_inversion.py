@@ -11,10 +11,16 @@ import swave.inversion as inversion_module
 from swave.inference import resolve_device
 from swave.inversion import (
     DifferentiableSurrogate,
+    EnsembleResult,
+    InversionRun,
+    ObjectiveTerms,
     SurrogateObjective,
     apply_observation_noise,
     build_reference_model,
     generate_initial_models,
+    invert_ensemble,
+    invert_one,
+    iqr_inlier_mask,
     regularization_matrix,
 )
 
@@ -42,6 +48,27 @@ def _toy_surrogate() -> DifferentiableSurrogate:
         target_std=torch.ones((4, 1), dtype=torch.float64),
         device=torch.device("cpu"),
     )
+
+
+class QuadraticObjective:
+    """Small optimizer fixture with an independently known bounded solution."""
+
+    frequencies = np.array([1.0, 2.0, 3.0])
+
+    def __init__(self, target: np.ndarray) -> None:
+        self.target = np.asarray(target, dtype=np.float64)
+
+    def value_and_grad(self, values):
+        difference = np.asarray(values, dtype=np.float64) - self.target
+        return float(np.sum(np.square(difference))), 2.0 * difference
+
+    def terms(self, values) -> ObjectiveTerms:
+        difference = np.asarray(values, dtype=np.float64) - self.target
+        total = float(np.sum(np.square(difference)))
+        return ObjectiveTerms(total=total, data_misfit=total, regularization=0.0)
+
+    def predict(self, values):
+        return np.full((4, 3), np.asarray(values, dtype=np.float64).mean())
 
 
 def test_reference_uses_only_fundamental_observation() -> None:
@@ -262,3 +289,290 @@ def test_inversion_rejects_mps_before_loading_checkpoint(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="MPS.*float64"):
         DifferentiableSurrogate.load(Path("unused.pt"), "mps")
+
+
+def test_lbfgsb_recovers_bounded_quadratic_solution() -> None:
+    objective = QuadraticObjective(target=np.linspace(0.5, 2.4, 20))
+    initial = np.full(20, 1.0)
+    lower = np.full(20, 0.3)
+    upper = np.full(20, 2.0)
+
+    result = invert_one(
+        objective,
+        initial,
+        lower,
+        upper,
+        max_iterations=100,
+        relative_tolerance=1e-9,
+    )
+
+    np.testing.assert_allclose(result.vs, np.minimum(objective.target, 2.0), atol=1e-6)
+    assert result.success
+    assert np.all((result.vs >= lower) & (result.vs <= upper))
+    assert result.initial_objective == pytest.approx(objective.terms(initial).total)
+    assert result.terms.total == pytest.approx(objective.terms(result.vs).total)
+    assert result.predicted_phase_velocity.shape == (4, 3)
+
+
+@pytest.mark.parametrize(
+    ("callback_result", "message"),
+    [
+        ((np.nan, np.zeros(20)), "objective value"),
+        ((np.array([1.0]), np.zeros(20)), "objective value"),
+        ((1.0, np.full(20, np.nan)), "objective gradient"),
+        ((1.0, np.zeros(19)), "objective gradient"),
+    ],
+)
+def test_lbfgsb_rejects_invalid_objective_callback_results(
+    callback_result, message
+) -> None:
+    objective = QuadraticObjective(target=np.ones(20))
+    objective.value_and_grad = lambda values: callback_result
+
+    with pytest.raises((ArithmeticError, ValueError), match=message):
+        invert_one(
+            objective,
+            np.ones(20),
+            np.full(20, 0.3),
+            np.full(20, 2.0),
+            max_iterations=10,
+            relative_tolerance=1e-5,
+        )
+
+
+def test_lbfgsb_validates_models_and_bounds_before_evaluation() -> None:
+    objective = QuadraticObjective(target=np.ones(20))
+
+    with pytest.raises(ValueError, match="initial.*20 finite"):
+        invert_one(
+            objective,
+            np.ones(19),
+            np.full(20, 0.3),
+            np.full(20, 2.0),
+            max_iterations=10,
+            relative_tolerance=1e-5,
+        )
+    with pytest.raises(ValueError, match="lower.*upper"):
+        invert_one(
+            objective,
+            np.ones(20),
+            np.full(20, 2.0),
+            np.full(20, 0.3),
+            max_iterations=10,
+            relative_tolerance=1e-5,
+        )
+
+
+@pytest.mark.parametrize(
+    "recovered",
+    [np.full(20, 2.1), np.full(20, np.nan)],
+)
+def test_lbfgsb_rejects_invalid_optimizer_results(monkeypatch, recovered) -> None:
+    def invalid_minimize(*args, **kwargs):
+        return inversion_module.scipy.optimize.OptimizeResult(
+            x=recovered,
+            success=True,
+            status=0,
+            message="invalid fixture",
+            nit=1,
+            nfev=1,
+        )
+
+    monkeypatch.setattr(inversion_module.scipy.optimize, "minimize", invalid_minimize)
+
+    with pytest.raises(ArithmeticError, match="invalid bounded model"):
+        invert_one(
+            QuadraticObjective(target=np.ones(20)),
+            np.ones(20),
+            np.full(20, 0.3),
+            np.full(20, 2.0),
+            max_iterations=10,
+            relative_tolerance=1e-5,
+        )
+
+
+def test_iqr_inliers_ignore_nonfinite_values_and_keep_zero_iqr_values() -> None:
+    keep = iqr_inlier_mask(np.array([1.0] * 9 + [100.0, np.nan, np.inf]))
+
+    assert keep.tolist() == [True] * 10 + [False, False]
+
+
+def test_ensemble_uses_only_successful_finite_inliers_for_percentiles(
+    monkeypatch,
+) -> None:
+    profiles = np.array([0.8, 1.0, 1.2, 1.4, 2.5, 0.0])
+    objectives = np.array([1.0, 2.0, 2.0, 3.0, 100.0, 0.0])
+    successes = np.array([True, True, True, True, True, False])
+
+    def fake_invert_one(objective, initial, lower, upper, **options):
+        index = int(initial[0])
+        value = profiles[index]
+        return InversionRun(
+            vs=np.full(20, value),
+            predicted_phase_velocity=np.full((4, 3), value),
+            success=bool(successes[index]),
+            status=index,
+            message=f"run-{index}",
+            iterations=index,
+            evaluations=index + 1,
+            initial_objective=float(objectives[index] + 10.0),
+            terms=ObjectiveTerms(
+                total=float(objectives[index]),
+                data_misfit=float(objectives[index]),
+                regularization=0.0,
+            ),
+        )
+
+    monkeypatch.setattr(inversion_module, "invert_one", fake_invert_one)
+    objective = QuadraticObjective(target=np.zeros(20))
+    starts = np.repeat(np.arange(6, dtype=np.float64)[:, None], 20, axis=1)
+
+    result = invert_ensemble(
+        objective,
+        starts,
+        np.full(20, -1.0),
+        np.full(20, 6.0),
+        max_iterations=10,
+        relative_tolerance=1e-5,
+        minimum_valid_solutions=4,
+    )
+
+    assert isinstance(result, EnsembleResult)
+    assert [run.message for run in result.runs] == [
+        f"run-{index}" for index in range(6)
+    ]
+    assert result.inlier_mask.tolist() == [True, True, True, True, False, False]
+    assert result.sufficient
+    np.testing.assert_allclose(result.median_vs, 1.1)
+    np.testing.assert_allclose(result.p10_vs, 0.86)
+    np.testing.assert_allclose(result.p90_vs, 1.34)
+    assert result.representative_terms.total == pytest.approx(20 * 1.1**2)
+    np.testing.assert_allclose(result.representative_prediction, 1.1)
+
+
+def test_ensemble_contains_per_start_failures_and_continues_in_order() -> None:
+    class SelectiveFailureObjective(QuadraticObjective):
+        def value_and_grad(self, values):
+            value = float(np.asarray(values)[0])
+            if value == pytest.approx(0.9):
+                raise RuntimeError("deliberate optimizer failure")
+            return value, np.zeros(20)
+
+        def terms(self, values) -> ObjectiveTerms:
+            value = float(np.asarray(values)[0])
+            return ObjectiveTerms(value, value, 0.0)
+
+    objective = SelectiveFailureObjective(target=np.ones(20))
+    starts = np.repeat(np.array([0.7, 0.9, 1.1])[:, None], 20, axis=1)
+
+    result = invert_ensemble(
+        objective,
+        starts,
+        np.full(20, 0.3),
+        np.full(20, 2.0),
+        max_iterations=10,
+        relative_tolerance=1e-5,
+        minimum_valid_solutions=2,
+    )
+
+    assert [run.success for run in result.runs] == [True, False, True]
+    assert result.runs[1].status == -1
+    assert "RuntimeError" in result.runs[1].message
+    assert np.all(np.isnan(result.runs[1].vs))
+    assert np.all(np.isnan(result.runs[1].predicted_phase_velocity))
+    assert np.isnan(result.runs[1].terms.total)
+    assert result.inlier_mask.tolist() == [True, False, True]
+    assert result.sufficient
+
+
+@pytest.mark.parametrize("invalid_value", [np.nan, 2.1])
+def test_ensemble_contains_invalid_initial_rows_and_runs_later_starts(
+    invalid_value,
+) -> None:
+    objective = QuadraticObjective(target=np.ones(20))
+    starts = np.repeat(np.array([0.8, invalid_value, 1.2])[:, None], 20, axis=1)
+
+    result = invert_ensemble(
+        objective,
+        starts,
+        np.full(20, 0.3),
+        np.full(20, 2.0),
+        max_iterations=10,
+        relative_tolerance=1e-5,
+        minimum_valid_solutions=2,
+    )
+
+    assert [run.success for run in result.runs] == [True, False, True]
+    assert result.runs[1].status == -1
+    assert "ValueError" in result.runs[1].message
+    assert result.inlier_mask.tolist() == [True, False, True]
+    assert result.sufficient
+
+
+def test_early_failed_run_uses_later_successful_prediction_shape() -> None:
+    class ObjectiveWithoutFrequencies:
+        def value_and_grad(self, values):
+            value = float(np.asarray(values)[0])
+            if value == pytest.approx(0.8):
+                raise RuntimeError("first start fails")
+            return value, np.zeros(20)
+
+        def terms(self, values) -> ObjectiveTerms:
+            value = float(np.asarray(values)[0])
+            return ObjectiveTerms(value, value, 0.0)
+
+        def predict(self, values):
+            return np.zeros((4, 3), dtype=np.float64)
+
+    starts = np.repeat(np.array([0.8, 1.2])[:, None], 20, axis=1)
+    result = invert_ensemble(
+        ObjectiveWithoutFrequencies(),
+        starts,
+        np.full(20, 0.3),
+        np.full(20, 2.0),
+        max_iterations=10,
+        relative_tolerance=1e-5,
+        minimum_valid_solutions=1,
+    )
+
+    assert not result.runs[0].success
+    assert result.runs[0].predicted_phase_velocity.shape == (4, 3)
+    assert np.all(np.isnan(result.runs[0].predicted_phase_velocity))
+    assert result.runs[1].predicted_phase_velocity.shape == (4, 3)
+
+
+def test_insufficient_ensemble_preserves_runs_but_returns_nan_statistics(
+    monkeypatch,
+) -> None:
+    def failed_invert_one(objective, initial, lower, upper, **options):
+        return InversionRun(
+            vs=np.full(20, float(initial[0])),
+            predicted_phase_velocity=np.zeros((4, 3)),
+            success=False,
+            status=2,
+            message="not converged",
+            iterations=10,
+            evaluations=11,
+            initial_objective=2.0,
+            terms=ObjectiveTerms(1.0, 1.0, 0.0),
+        )
+
+    monkeypatch.setattr(inversion_module, "invert_one", failed_invert_one)
+    result = invert_ensemble(
+        QuadraticObjective(target=np.ones(20)),
+        np.ones((3, 20)),
+        np.full(20, 0.3),
+        np.full(20, 2.0),
+        max_iterations=10,
+        relative_tolerance=1e-5,
+        minimum_valid_solutions=2,
+    )
+
+    assert len(result.runs) == 3
+    assert not result.sufficient
+    assert not np.any(result.inlier_mask)
+    assert np.all(np.isnan(result.median_vs))
+    assert np.all(np.isnan(result.p10_vs))
+    assert np.all(np.isnan(result.p90_vs))
+    assert np.isnan(result.representative_terms.total)
+    assert np.all(np.isnan(result.representative_prediction))
