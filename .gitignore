@@ -8,3 +8,7 @@ build/
 dist/
 data/
 runs/
+# 反演大文件（checkpoint 与缓存可再生成）
+inversion/results/*.pt
+inversion/results/*.log
+inversion/results/fold_data_cache.npz
