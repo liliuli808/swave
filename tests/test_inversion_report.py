@@ -10,7 +10,12 @@ import numpy as np
 import pytest
 
 import swave.inversion_report as report_module
-from swave.config import InversionConfig
+from swave.config import (
+    DatasetConfig,
+    InversionConfig,
+    PhysicsConfig,
+    canonical_hash,
+)
 from swave.inversion_report import (
     build_inversion_report,
     compute_frequency_metrics,
@@ -27,6 +32,10 @@ from swave.inversion_results import (
 
 IDS = np.array([90, 91, 92, 93], dtype=np.uint64)
 KINDS = np.arange(4, dtype=np.uint8)
+REPORT_DATASET_CONFIG = DatasetConfig(
+    physics=PhysicsConfig(fmin=1.0, fmax=120.0, fstep=1.0)
+)
+REPORT_DATASET_HASH = canonical_hash(REPORT_DATASET_CONFIG)
 
 
 def _result_batch(
@@ -90,7 +99,8 @@ def _source_dataset(tmp_path: Path) -> tuple[Path, np.ndarray]:
         handle.create_dataset("sample_id", data=IDS, dtype="u8")
         handle.create_dataset("vs", data=truth, dtype="f4")
     (directory / "manifest.json").write_text(
-        json.dumps({"config_hash": "a" * 64, "complete": True}), encoding="utf-8"
+        json.dumps({"config_hash": REPORT_DATASET_HASH, "complete": True}),
+        encoding="utf-8",
     )
     return directory, truth
 
@@ -106,7 +116,7 @@ def _complete_results(tmp_path: Path, checkpoint: Path, truth: np.ndarray) -> Pa
     config = InversionConfig(initial_models=2, minimum_valid_solutions=1)
     manifest = initialize_result_manifest(
         results,
-        dataset_config_hash="a" * 64,
+        dataset_config_hash=REPORT_DATASET_HASH,
         checkpoint=checkpoint,
         config=config,
         experiment="both",
@@ -475,7 +485,12 @@ def test_report_validates_complete_results_before_loading_truth(
     )
 
     with pytest.raises(ValueError, match="incomplete"):
-        build_inversion_report(results, tmp_path / "dataset", tmp_path / "report")
+        build_inversion_report(
+            results,
+            tmp_path / "dataset",
+            tmp_path / "report",
+            dataset_config=REPORT_DATASET_CONFIG,
+        )
 
     assert events == ["validated"]
 
@@ -497,7 +512,12 @@ def test_report_rejects_corrupt_result_before_truth_access(
     )
 
     with pytest.raises(ValueError, match="checksum|content|sample_id"):
-        build_inversion_report(results, dataset, tmp_path / "report")
+        build_inversion_report(
+            results,
+            dataset,
+            tmp_path / "report",
+            dataset_config=REPORT_DATASET_CONFIG,
+        )
 
     assert events == []
 
@@ -515,7 +535,7 @@ def test_report_rejects_clean_noisy_sample_mismatch_before_truth(
     )
     manifest = initialize_result_manifest(
         results,
-        dataset_config_hash="a" * 64,
+        dataset_config_hash=REPORT_DATASET_HASH,
         checkpoint=checkpoint,
         config=InversionConfig(),
         experiment="full",
@@ -541,7 +561,12 @@ def test_report_rejects_clean_noisy_sample_mismatch_before_truth(
     )
 
     with pytest.raises(ValueError, match="clean and noisy.*align"):
-        build_inversion_report(results, dataset, tmp_path / "report")
+        build_inversion_report(
+            results,
+            dataset,
+            tmp_path / "report",
+            dataset_config=REPORT_DATASET_CONFIG,
+        )
 
     assert events == []
 
@@ -557,7 +582,7 @@ def test_report_rejects_a_plot_group_without_successful_rows(tmp_path: Path) -> 
     )
     manifest = initialize_result_manifest(
         results,
-        dataset_config_hash="a" * 64,
+        dataset_config_hash=REPORT_DATASET_HASH,
         checkpoint=checkpoint,
         config=InversionConfig(),
         experiment="full",
@@ -574,11 +599,35 @@ def test_report_rejects_a_plot_group_without_successful_rows(tmp_path: Path) -> 
         mark_job_complete(results, job, path)
 
     with pytest.raises(ValueError, match="empty successful group.*coupled"):
-        build_inversion_report(results, dataset, tmp_path / "report")
+        build_inversion_report(
+            results,
+            dataset,
+            tmp_path / "report",
+            dataset_config=REPORT_DATASET_CONFIG,
+        )
+
+
+def test_report_requires_the_matching_dataset_configuration(
+    tmp_path: Path,
+) -> None:
+    dataset, truth = _source_dataset(tmp_path)
+    checkpoint = tmp_path / "best.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    results = _complete_results(tmp_path, checkpoint, truth)
+
+    with pytest.raises(TypeError, match="dataset_config"):
+        build_inversion_report(results, dataset, tmp_path / "missing-config")
+    with pytest.raises(ValueError, match="configuration.*does not match"):
+        build_inversion_report(
+            results,
+            dataset,
+            tmp_path / "wrong-config",
+            dataset_config=DatasetConfig(),
+        )
 
 
 def test_report_separates_scopes_and_writes_deterministic_artifacts(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dataset, truth = _source_dataset(tmp_path)
     checkpoint = tmp_path / "best.pt"
@@ -587,8 +636,27 @@ def test_report_separates_scopes_and_writes_deterministic_artifacts(
     first_output = tmp_path / "report-a"
     second_output = tmp_path / "report-b"
 
-    first = build_inversion_report(results, dataset, first_output)
-    second = build_inversion_report(results, dataset, second_output)
+    plotted_frequencies: list[np.ndarray] = []
+    plot_representative = report_module._plot_representative
+
+    def capture_frequencies(*args, **kwargs):
+        plotted_frequencies.append(np.asarray(args[4]).copy())
+        return plot_representative(*args, **kwargs)
+
+    monkeypatch.setattr(report_module, "_plot_representative", capture_frequencies)
+
+    first = build_inversion_report(
+        results,
+        dataset,
+        first_output,
+        dataset_config=REPORT_DATASET_CONFIG,
+    )
+    second = build_inversion_report(
+        results,
+        dataset,
+        second_output,
+        dataset_config=REPORT_DATASET_CONFIG,
+    )
 
     assert first == second
     assert set(first["experiment_scopes"]) == {"full", "deep"}
@@ -604,6 +672,11 @@ def test_report_separates_scopes_and_writes_deterministic_artifacts(
         "vs_mae_km_s"
     ] == pytest.approx(0.1)
     assert first["representatives"]["normal"]["clean"]["sample_id"] == 90
+    assert len(plotted_frequencies) == 16
+    for frequencies in plotted_frequencies:
+        np.testing.assert_array_equal(
+            frequencies, REPORT_DATASET_CONFIG.physics.frequencies
+        )
 
     expected_pngs = {
         "vs-error-by-depth.png",

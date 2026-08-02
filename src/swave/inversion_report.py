@@ -1125,7 +1125,7 @@ def build_inversion_report(
     dataset_dir: Path | str,
     output_dir: Path | str,
     *,
-    dataset_config: DatasetConfig | None = None,
+    dataset_config: DatasetConfig,
 ) -> dict[str, Any]:
     """Build a deterministic report after validating the complete result set."""
     results_path = Path(results_dir)
@@ -1137,9 +1137,9 @@ def build_inversion_report(
     grouped_batches = _load_result_groups(results_path, manifest)
     requested_ids = _validate_result_alignment(grouped_batches)
     _dataset_identity(dataset_path, manifest.dataset_config_hash)
-    if dataset_config is not None and canonical_hash(dataset_config) != (
-        manifest.dataset_config_hash
-    ):
+    if not isinstance(dataset_config, DatasetConfig):
+        raise TypeError("dataset_config must be a DatasetConfig")
+    if canonical_hash(dataset_config) != manifest.dataset_config_hash:
         raise ValueError(
             "report dataset configuration does not match inversion results"
         )
@@ -1152,7 +1152,7 @@ def build_inversion_report(
         experiment: _scope_rows(batches_by_noise, truth_by_id)
         for experiment, batches_by_noise in sorted(grouped_batches.items())
     }
-    frequencies = (dataset_config or DatasetConfig()).physics.frequencies
+    frequencies = dataset_config.physics.frequencies
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     if not output_path.is_dir():
