@@ -19,7 +19,12 @@ from .config import TrainingConfig
 from .dataset import validate_dataset_files
 from .inference import ForwardPredictor, resolve_device
 from .network import FourHeadForwardModel, masked_smooth_l1
-from .splits import SPLIT_POLICY, Split, mask_for_split
+from .splits import (
+    SPLIT_POLICY,
+    Split,
+    mask_for_split,
+    validate_checkpoint_split_policy,
+)
 
 
 @dataclass(frozen=True)
@@ -274,6 +279,7 @@ def train(config: TrainingConfig) -> Path:
     best_mae = float("inf")
     if config.resume and last_path.exists():
         payload = torch.load(last_path, map_location=device, weights_only=False)
+        validate_checkpoint_split_policy(payload)
         if payload["dataset_config_hash"] != manifest.config_hash:
             raise ValueError("checkpoint dataset configuration hash does not match")
         _validate_resume_config(payload["training_config"], config)
@@ -384,8 +390,7 @@ def evaluate(
     )
     if payload.get("dataset_config_hash") != manifest.config_hash:
         raise ValueError("checkpoint dataset configuration hash does not match")
-    if payload.get("split_policy") != SPLIT_POLICY:
-        raise ValueError("checkpoint split policy does not match")
+    validate_checkpoint_split_policy(payload)
     predictor = ForwardPredictor.load(checkpoint, device=device)
     dataset = HDF5ShardDataset(dataset_path, "test")
     if not dataset:

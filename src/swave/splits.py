@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Literal
 
 import numpy as np
@@ -37,3 +38,8 @@ def mask_for_split(sample_ids: ArrayLike, split: Split) -> NDArray[np.bool_]:
     }
     lower, upper = bounds[split]
     return np.asarray((remainder >= lower) & (remainder < upper), dtype=np.bool_)
+
+
+def validate_checkpoint_split_policy(payload: Mapping[str, object]) -> None:
+    if payload.get("split_policy") != SPLIT_POLICY:
+        raise ValueError("checkpoint split policy does not match")

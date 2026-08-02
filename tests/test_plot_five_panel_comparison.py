@@ -130,6 +130,46 @@ def test_validate_inputs_rejects_checkpoint_from_other_dataset(
         module._validate_inputs(dataset_dir, checkpoint)
 
 
+def test_validate_inputs_rejects_checkpoint_without_split_policy(
+    tmp_path: Path,
+) -> None:
+    module = _load_script()
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    shard_path = dataset_dir / "shard-00000.h5"
+    config_hash = "a" * 64
+    with h5py.File(shard_path, "w") as handle:
+        handle.attrs["schema_version"] = 1
+        handle.attrs["shard_id"] = 0
+        handle.attrs["config_hash"] = config_hash
+    checksum = hashlib.sha256(shard_path.read_bytes()).hexdigest()
+    (dataset_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "config_hash": config_hash,
+                "global_seed": 20260727,
+                "expected_shards": 1,
+                "completed_shards": [0],
+                "accepted_by_kind": {},
+                "rejected_by_kind": {},
+                "rejected_by_reason": {},
+                "recovered_models": 0,
+                "package_version": "0.1.0",
+                "created_at": "2026-07-28T00:00:00+00:00",
+                "shard_sha256": {"0": checksum},
+                "complete": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    checkpoint = tmp_path / "best.pt"
+    torch.save({"dataset_config_hash": config_hash}, checkpoint)
+
+    with pytest.raises(ValueError, match="split policy"):
+        module._validate_inputs(dataset_dir, checkpoint)
+
+
 def test_argument_parser_defaults_to_automatic_device() -> None:
     module = _load_script()
 

@@ -6,6 +6,7 @@ import torch
 
 from swave.inference import ForwardPredictor
 from swave.network import FourHeadForwardModel
+from swave.splits import SPLIT_POLICY
 
 
 def _checkpoint(path: Path) -> Path:
@@ -17,6 +18,7 @@ def _checkpoint(path: Path) -> Path:
             "input_std": np.ones(20, dtype=np.float32),
             "target_mean": np.zeros((4, 1), dtype=np.float32),
             "target_std": np.ones((4, 1), dtype=np.float32),
+            "split_policy": SPLIT_POLICY,
         },
         path,
     )
@@ -45,3 +47,13 @@ def test_predict_rejects_nonfinite_or_out_of_range_vs(tmp_path: Path) -> None:
         predictor.predict(invalid)
     with pytest.raises(ValueError, match="0.3"):
         predictor.predict(np.full(20, 2.7))
+
+
+def test_load_rejects_checkpoint_without_split_policy(tmp_path: Path) -> None:
+    checkpoint = _checkpoint(tmp_path / "model.pt")
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload.pop("split_policy")
+    torch.save(payload, checkpoint)
+
+    with pytest.raises(ValueError, match="split policy"):
+        ForwardPredictor.load(checkpoint, device="cpu")

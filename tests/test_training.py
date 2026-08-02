@@ -156,6 +156,31 @@ def test_evaluation_rejects_checkpoint_with_different_split_policy(
         evaluate(checkpoint, data_dir, device="cpu")
 
 
+def test_training_resume_rejects_checkpoint_with_different_split_policy(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    run_dir = tmp_path / "run"
+    _write_tiny_dataset(data_dir)
+    config = replace(
+        TrainingConfig(),
+        dataset_dir=data_dir,
+        output_dir=run_dir,
+        batch_size=2,
+        epochs=1,
+        num_workers=0,
+        device="cpu",
+    )
+    train(config)
+    checkpoint = run_dir / "last.pt"
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload["split_policy"] = "mod100-v1-90-5-5"
+    torch.save(payload, checkpoint)
+
+    with pytest.raises(ValueError, match="split policy"):
+        train(replace(config, resume=True))
+
+
 def test_training_rejects_incomplete_manifest(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     _write_tiny_dataset(data_dir)

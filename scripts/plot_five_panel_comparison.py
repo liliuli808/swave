@@ -23,7 +23,7 @@ from swave.config import load_dataset_config
 from swave.dataset import validate_dataset_files
 from swave.geology import ModelKind
 from swave.inference import ForwardPredictor
-from swave.splits import mask_for_split
+from swave.splits import mask_for_split, validate_checkpoint_split_policy
 
 
 def plot_comparison(
@@ -187,6 +187,7 @@ def _validate_inputs(dataset_dir: Path, checkpoint: Path) -> None:
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if payload.get("dataset_config_hash") != manifest.config_hash:
         raise ValueError("checkpoint dataset configuration hash does not match")
+    validate_checkpoint_split_policy(payload)
 
 
 def _parse_arguments(
