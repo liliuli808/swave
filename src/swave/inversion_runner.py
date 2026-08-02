@@ -387,9 +387,17 @@ def run_inversion_job(
     return mark_job_complete(config.output_dir, job.name, path)
 
 
+def _resolve_inversion_workers(device_type: str, requested: int) -> int:
+    if device_type != "cpu":
+        if requested not in {0, 1}:
+            raise ValueError("CUDA inversion requires workers == 1 or workers == 0")
+        return 1
+    return requested or (os.cpu_count() or 1)
+
+
 def _validate_experiment_inputs(
     config: InversionConfig,
-) -> tuple[DatasetConfig, str, str]:
+) -> tuple[DatasetConfig, str, str, int]:
     dataset_config = load_dataset_config(config.dataset_config)
     dataset_manifest = validate_dataset_files(config.dataset_dir)
     dataset_hash = canonical_hash(dataset_config)
@@ -411,9 +419,8 @@ def _validate_experiment_inputs(
         raise ValueError("checkpoint dataset hash does not match the dataset")
 
     device = resolve_inversion_device(config.device)
-    if device.type != "cpu" and config.workers != 1:
-        raise ValueError("CUDA and MPS inversion require workers == 1")
-    return dataset_config, dataset_hash, device.type
+    worker_count = _resolve_inversion_workers(device.type, config.workers)
+    return dataset_config, dataset_hash, device.type, worker_count
 
 
 def _job_sample_ids(job: InversionJob) -> np.ndarray:
@@ -456,7 +463,9 @@ def run_inversion_experiment(
         raise TypeError("config must be an InversionConfig")
     if experiment not in {"full", "deep", "both"}:
         raise ValueError("experiment must be full, deep, or both")
-    dataset_config, dataset_hash, device_type = _validate_experiment_inputs(config)
+    dataset_config, dataset_hash, device_type, resolved_workers = (
+        _validate_experiment_inputs(config)
+    )
     jobs = build_jobs(
         config.dataset_dir,
         experiment,
@@ -478,10 +487,13 @@ def run_inversion_experiment(
         task_count=config.task_count,
     )
     pending = tuple(job for job in assigned if job.name not in manifest.completed_jobs)
-    worker_config = replace(config, device=device_type)
     if pending:
-        worker_count = config.workers or (os.cpu_count() or 1)
-        worker_count = min(worker_count, len(pending))
+        worker_count = min(resolved_workers, len(pending))
+        worker_config = replace(
+            config,
+            device=device_type,
+            workers=worker_count,
+        )
         if worker_count == 1:
             for job in pending:
                 run_inversion_job(job, worker_config, dataset_config, manifest)

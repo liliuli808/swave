@@ -13,7 +13,12 @@ import pytest
 import torch
 
 import swave.inversion_runner as runner_module
-from swave.config import DatasetConfig, InversionConfig, canonical_hash
+from swave.config import (
+    DatasetConfig,
+    InversionConfig,
+    canonical_hash,
+    inversion_identity_hash,
+)
 from swave.inversion import EnsembleResult, InversionRun, ObjectiveTerms
 from swave.inversion_data import InversionSample
 from swave.inversion_results import (
@@ -668,6 +673,89 @@ def test_cpu_workers_submit_each_job_with_spawn_context(
     assert manifest.completed_jobs == (
         "full-clean-shard-00000",
         "full-noise_1pct-shard-00000",
+    )
+
+
+def test_cpu_auto_workers_resolve_to_available_pending_jobs(
+    monkeypatch,
+    tiny_complete_dataset: Path,
+    tiny_checkpoint: Path,
+    tmp_path: Path,
+) -> None:
+    config = replace(
+        _runnable_config(tiny_complete_dataset, tiny_checkpoint, tmp_path),
+        workers=0,
+    )
+    _patch_successful_execution(monkeypatch)
+    monkeypatch.setattr(runner_module.os, "cpu_count", lambda: 8)
+    executor_calls: list[tuple[int, str]] = []
+    submitted_workers: list[int] = []
+
+    class RecordingExecutor:
+        def __init__(self, *, max_workers, mp_context) -> None:
+            executor_calls.append((max_workers, mp_context.get_start_method()))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            return None
+
+        def submit(self, function, job, worker_config, *args) -> Future:
+            submitted_workers.append(worker_config.workers)
+            future = Future()
+            future.set_result(function(job, worker_config, *args))
+            return future
+
+    monkeypatch.setattr(runner_module, "ProcessPoolExecutor", RecordingExecutor)
+
+    manifest = run_inversion_experiment(config, "full")
+
+    assert executor_calls == [(2, "spawn")]
+    assert submitted_workers == [2, 2]
+    assert manifest.complete
+
+
+def test_cuda_auto_workers_resolve_to_one_and_run_sequentially(
+    monkeypatch,
+    tiny_complete_dataset: Path,
+    tiny_checkpoint: Path,
+    tmp_path: Path,
+) -> None:
+    config = replace(
+        _runnable_config(tiny_complete_dataset, tiny_checkpoint, tmp_path),
+        workers=0,
+    )
+    _patch_successful_execution(monkeypatch)
+    monkeypatch.setattr(
+        runner_module,
+        "resolve_inversion_device",
+        lambda requested: torch.device("cuda"),
+    )
+    worker_configs: list[InversionConfig] = []
+    run_job = runner_module.run_inversion_job
+
+    def record_worker_config(job, worker_config, *args):
+        worker_configs.append(worker_config)
+        return run_job(job, worker_config, *args)
+
+    monkeypatch.setattr(runner_module, "run_inversion_job", record_worker_config)
+    monkeypatch.setattr(
+        runner_module,
+        "ProcessPoolExecutor",
+        lambda *args, **kwargs: pytest.fail(
+            "CUDA auto workers must execute through the sequential path"
+        ),
+    )
+
+    manifest = run_inversion_experiment(config, "full")
+
+    assert manifest.complete
+    assert len(worker_configs) == 2
+    assert all(item.device == "cuda" and item.workers == 1 for item in worker_configs)
+    assert manifest.inversion_config_hash == inversion_identity_hash(config)
+    assert manifest.inversion_config_hash == inversion_identity_hash(
+        replace(config, device="cuda", workers=1)
     )
 
 

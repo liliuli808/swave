@@ -179,10 +179,13 @@ swave inversion-report \
   --output-dir results/inversion-report
 ```
 
-CPU tasks may override `--workers`. CUDA inversion must use one worker per task;
-multi-GPU scheduling is external, with one visible device assigned to each
-cluster task. Task partitioning changes execution ownership only and does not
-change deterministic sample, noise, or initial-model seeds.
+The default `workers = 0` is operational auto-selection: CPU tasks use the
+available cores up to their pending-job count, while CUDA resolves to one worker
+per task. An explicit CUDA worker count other than 1 is rejected. Multi-GPU
+scheduling is external, with one visible device assigned to each cluster task.
+Task partitioning and resolved worker counts change execution ownership only;
+they do not change result identity or deterministic sample, noise, or
+initial-model seeds.
 
 ## Predict and plot
 
