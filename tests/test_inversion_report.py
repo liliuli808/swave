@@ -16,6 +16,7 @@ from swave.config import (
     PhysicsConfig,
     canonical_hash,
 )
+from swave.dataset import dataset_manifest_sha256, load_manifest
 from swave.inversion_report import (
     build_inversion_report,
     compute_frequency_metrics,
@@ -27,6 +28,7 @@ from swave.inversion_results import (
     ResultBatch,
     initialize_result_manifest,
     mark_job_complete,
+    sample_id_sha256,
     write_result_shard,
 )
 
@@ -78,11 +80,19 @@ def _result_batch(
             ).copy(),
             ensemble_success=np.ones((count, starts), dtype=np.bool_),
             ensemble_status=np.zeros((count, starts), dtype=np.int32),
+            ensemble_iterations=np.full((count, starts), 4, dtype=np.int32),
+            ensemble_evaluations=np.full((count, starts), 5, dtype=np.int32),
+            ensemble_initial_objective=np.full((count, starts), 2.0, dtype=np.float64),
             ensemble_objective=np.ones((count, starts), dtype=np.float64),
+            ensemble_failure_code=np.full((count, starts), b"", dtype="S64"),
+            ensemble_message=np.full((count, starts), b"converged", dtype="S256"),
             ensemble_inlier_mask=np.ones((count, starts), dtype=np.bool_),
             median_vs=recovered.copy(),
             p10_vs=np.asarray(recovered - 0.1, dtype=np.float32),
             p90_vs=np.asarray(recovered + 0.1, dtype=np.float32),
+            physical_success=np.ones(count, dtype=np.bool_),
+            physical_status=np.zeros(count, dtype=np.int32),
+            physical_failure_code=np.full(count, b"", dtype="S64"),
             physical_phase_velocity=np.asarray(
                 observed + offset + 0.05, dtype=np.float32
             ),
@@ -96,10 +106,32 @@ def _source_dataset(tmp_path: Path) -> tuple[Path, np.ndarray]:
     directory.mkdir()
     truth = np.linspace(0.5, 1.5, 80, dtype=np.float32).reshape(4, 20)
     with h5py.File(directory / "shard-00000.h5", "w") as handle:
+        handle.attrs["schema_version"] = 1
+        handle.attrs["shard_id"] = 0
+        handle.attrs["config_hash"] = REPORT_DATASET_HASH
         handle.create_dataset("sample_id", data=IDS, dtype="u8")
         handle.create_dataset("vs", data=truth, dtype="f4")
+    shard_sha256 = hashlib.sha256(
+        (directory / "shard-00000.h5").read_bytes()
+    ).hexdigest()
     (directory / "manifest.json").write_text(
-        json.dumps({"config_hash": REPORT_DATASET_HASH, "complete": True}),
+        json.dumps(
+            {
+                "schema_version": 1,
+                "config_hash": REPORT_DATASET_HASH,
+                "global_seed": 20260727,
+                "expected_shards": 1,
+                "completed_shards": [0],
+                "accepted_by_kind": {},
+                "rejected_by_kind": {},
+                "rejected_by_reason": {},
+                "recovered_models": 0,
+                "package_version": "0.1.0",
+                "created_at": "2026-08-02T00:00:00+00:00",
+                "shard_sha256": {"0": shard_sha256},
+                "complete": True,
+            }
+        ),
         encoding="utf-8",
     )
     return directory, truth
@@ -110,17 +142,27 @@ def _complete_results(tmp_path: Path, checkpoint: Path, truth: np.ndarray) -> Pa
     jobs = (
         "full-clean-shard-00000",
         "full-noise_1pct-shard-00000",
-        "deep-clean-shard-00000",
-        "deep-noise_1pct-shard-00000",
+        (
+            f"deep-clean-samples-{int(IDS[0]):020d}-{int(IDS[-1]):020d}-"
+            f"{sample_id_sha256(IDS)[:12]}"
+        ),
+        (
+            f"deep-noise_1pct-samples-{int(IDS[0]):020d}-{int(IDS[-1]):020d}-"
+            f"{sample_id_sha256(IDS)[:12]}"
+        ),
     )
     config = InversionConfig(initial_models=2, minimum_valid_solutions=1)
     manifest = initialize_result_manifest(
         results,
         dataset_config_hash=REPORT_DATASET_HASH,
+        dataset_manifest_sha256=dataset_manifest_sha256(
+            load_manifest(tmp_path / "dataset" / "manifest.json")
+        ),
         checkpoint=checkpoint,
         config=config,
         experiment="both",
         expected_jobs=jobs,
+        expected_sample_ids_by_job={job: IDS for job in jobs},
     )
     for job in jobs:
         deep = job.startswith("deep-")
@@ -229,8 +271,12 @@ def test_compute_inversion_metrics_keeps_failures_out_of_accuracy() -> None:
 
     assert metrics["sample_count"] == 4
     assert metrics["successful_count"] == 3
-    assert metrics["convergence"]["success_fraction"] == pytest.approx(0.75)
-    assert metrics["convergence"]["failure_code_counts"] == {"optimizer_failure": 1}
+    assert metrics["sample_outcomes"]["inversion"]["success_fraction"] == pytest.approx(
+        0.75
+    )
+    assert metrics["sample_outcomes"]["inversion"]["failure_code_counts"] == {
+        "optimizer_failure": 1
+    }
     assert metrics["vs"]["row_count"] == 3
     assert metrics["vs"]["mae_km_s"] == pytest.approx(0.1)
     assert metrics["vs"]["per_layer"]["recovery_fraction"] == pytest.approx([0.75] * 20)
@@ -269,6 +315,124 @@ def test_physical_metrics_mask_invalid_infinities_without_contamination() -> Non
         "missing_fraction"
     ] == pytest.approx(1.0 / (4 * 4 * 120))
     assert metrics["physical_frequency"]["overall"]["mae_km_s"] == pytest.approx(0.1)
+
+
+def test_physical_failure_retains_inversion_metrics_and_counts_missing_cells() -> None:
+    truth = np.linspace(0.5, 1.5, 80, dtype=np.float32).reshape(4, 20)
+    base = _result_batch(truth, offset=0.05, deep=True)
+    assert base.physical_phase_velocity is not None
+    assert base.physical_valid_mask is not None
+    physical = base.physical_phase_velocity.copy()
+    physical_mask = base.physical_valid_mask.copy()
+    physical[0] = np.nan
+    physical_mask[0] = False
+    physical[1, 0, 0] = np.nan
+    physical_mask[1, 0, 0] = False
+    batch = replace(
+        base,
+        physical_phase_velocity=physical,
+        physical_valid_mask=physical_mask,
+        physical_success=np.array([False, True, True, True], dtype=np.bool_),
+        physical_status=np.array([-1, 0, 0, 0], dtype=np.int32),
+        physical_failure_code=np.array(
+            [b"physical_solver_failure", b"", b"", b""], dtype="S64"
+        ),
+    )
+
+    metrics = compute_inversion_metrics(batch, truth)
+
+    assert metrics["successful_count"] == 4
+    assert metrics["vs"]["row_count"] == 4
+    assert metrics["sample_outcomes"]["physical"]["successful_count"] == 3
+    assert metrics["sample_outcomes"]["physical"]["failure_code_counts"] == {
+        "physical_solver_failure": 1
+    }
+    expected_missing = (4 * 120 + 1) / (4 * 4 * 120)
+    assert metrics["physical_frequency"]["overall"][
+        "missing_fraction"
+    ] == pytest.approx(expected_missing)
+
+
+def test_deep_metrics_report_start_convergence_rejection_and_effort() -> None:
+    truth = np.linspace(0.5, 1.5, 80, dtype=np.float32).reshape(4, 20)
+    base = _result_batch(truth, offset=0.05, deep=True)
+    count, starts = 4, 2
+    batch = replace(
+        base,
+        ensemble_success=np.array(
+            [[True, False], [True, True], [True, True], [True, True]],
+            dtype=np.bool_,
+        ),
+        ensemble_inlier_mask=np.array(
+            [[True, False], [True, False], [True, True], [True, True]],
+            dtype=np.bool_,
+        ),
+        ensemble_iterations=np.arange(count * starts, dtype=np.int32).reshape(
+            count, starts
+        ),
+        ensemble_evaluations=(
+            np.arange(count * starts, dtype=np.int32).reshape(count, starts) + 1
+        ),
+        ensemble_initial_objective=np.full((count, starts), 2.0, dtype=np.float64),
+        ensemble_failure_code=np.array(
+            [[b"", b"optimizer_failure"], [b"", b""], [b"", b""], [b"", b""]],
+            dtype="S64",
+        ),
+        ensemble_message=np.full((count, starts), b"diagnostic", dtype="S256"),
+        physical_success=np.ones(count, dtype=np.bool_),
+        physical_status=np.zeros(count, dtype=np.int32),
+        physical_failure_code=np.full(count, b"", dtype="S64"),
+    )
+
+    metrics = compute_inversion_metrics(batch, truth)
+    starts_metrics = metrics["start_diagnostics"]
+
+    assert "convergence" not in metrics
+    assert starts_metrics["start_count"] == 8
+    assert starts_metrics["convergence"]["successful_count"] == 7
+    assert starts_metrics["convergence"]["success_fraction"] == pytest.approx(0.875)
+    assert starts_metrics["iqr_rejection"]["rejected_successful_count"] == 1
+    assert starts_metrics["failure_code_counts"] == {"optimizer_failure": 1}
+    assert starts_metrics["effort"]["iterations"]["maximum"] == 7.0
+
+
+def test_paired_deep_delta_reports_start_convergence_and_effort_changes() -> None:
+    truth = np.ones((4, 20), dtype=np.float64)
+    batch = _result_batch(truth, offset=0.1, deep=True)
+    count, starts = 4, 2
+    common = {
+        "ensemble_evaluations": np.full((count, starts), 5, dtype=np.int32),
+        "ensemble_initial_objective": np.full((count, starts), 2.0, dtype=np.float64),
+        "ensemble_failure_code": np.full((count, starts), b"", dtype="S64"),
+        "ensemble_message": np.full((count, starts), b"diagnostic", dtype="S256"),
+        "physical_success": np.ones(count, dtype=np.bool_),
+        "physical_status": np.zeros(count, dtype=np.int32),
+        "physical_failure_code": np.full(count, b"", dtype="S64"),
+    }
+    clean_batch = replace(
+        batch,
+        ensemble_iterations=np.full((count, starts), 4, dtype=np.int32),
+        **common,
+    )
+    noisy_success = np.ones((count, starts), dtype=np.bool_)
+    noisy_success[0, 0] = False
+    noisy_codes = np.full((count, starts), b"", dtype="S64")
+    noisy_codes[0, 0] = b"optimizer_failure"
+    noisy_batch = replace(
+        batch,
+        ensemble_success=noisy_success,
+        ensemble_inlier_mask=noisy_success.copy(),
+        ensemble_iterations=np.full((count, starts), 6, dtype=np.int32),
+        **{**common, "ensemble_failure_code": noisy_codes},
+    )
+    clean = report_module._rows_from_batch(clean_batch, truth, "clean")
+    noisy = report_module._rows_from_batch(noisy_batch, truth, "noise_1pct")
+
+    delta = report_module._group_delta(clean, noisy)["start_diagnostics"]
+
+    assert delta["paired_start_count"] == 8
+    assert delta["convergence_fraction"] == pytest.approx(-0.125)
+    assert delta["iterations_mean"] == pytest.approx(2.0)
 
 
 def test_representative_plot_uses_validated_physical_frequency_grid(
@@ -495,6 +659,54 @@ def test_report_validates_complete_results_before_loading_truth(
     assert events == ["validated"]
 
 
+def test_report_checksum_validates_dataset_identity_before_truth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    results = tmp_path / "results"
+    results.mkdir()
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    events: list[str] = []
+    manifest = type(
+        "ManifestStub",
+        (),
+        {
+            "dataset_config_hash": REPORT_DATASET_HASH,
+            "dataset_manifest_sha256": "d" * 64,
+        },
+    )()
+    monkeypatch.setattr(
+        report_module,
+        "validate_complete_results",
+        lambda path: events.append("results") or manifest,
+    )
+    monkeypatch.setattr(
+        report_module,
+        "validate_dataset_files",
+        lambda path: (
+            events.append("dataset")
+            or (_ for _ in ()).throw(
+                ValueError("dataset shard checksum does not match")
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        report_module,
+        "_load_true_vs",
+        lambda *args: events.append("truth"),
+    )
+
+    with pytest.raises(ValueError, match="checksum"):
+        build_inversion_report(
+            results,
+            dataset,
+            tmp_path / "report",
+            dataset_config=REPORT_DATASET_CONFIG,
+        )
+
+    assert events == ["results", "dataset"]
+
+
 def test_report_rejects_corrupt_result_before_truth_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -536,10 +748,14 @@ def test_report_rejects_clean_noisy_sample_mismatch_before_truth(
     manifest = initialize_result_manifest(
         results,
         dataset_config_hash=REPORT_DATASET_HASH,
+        dataset_manifest_sha256=dataset_manifest_sha256(
+            load_manifest(dataset / "manifest.json")
+        ),
         checkpoint=checkpoint,
         config=InversionConfig(),
         experiment="full",
         expected_jobs=jobs,
+        expected_sample_ids_by_job={jobs[0]: IDS, jobs[1]: IDS[:3]},
     )
     clean = _result_batch(truth, offset=0.05, deep=False)
     noisy = _result_batch(
@@ -583,10 +799,14 @@ def test_report_rejects_a_plot_group_without_successful_rows(tmp_path: Path) -> 
     manifest = initialize_result_manifest(
         results,
         dataset_config_hash=REPORT_DATASET_HASH,
+        dataset_manifest_sha256=dataset_manifest_sha256(
+            load_manifest(dataset / "manifest.json")
+        ),
         checkpoint=checkpoint,
         config=InversionConfig(),
         experiment="full",
         expected_jobs=jobs,
+        expected_sample_ids_by_job={job: IDS for job in jobs},
     )
     for job in jobs:
         batch = _result_batch(truth, offset=0.05, deep=False)

@@ -592,7 +592,7 @@ Catch arithmetic/runtime/value failures at the per-start wrapper boundary and st
 
 - [ ] **Step 4: Implement ensemble aggregation**
 
-`iqr_inlier_mask()` operates only on finite objectives, applies `[Q1-1.5*IQR, Q3+1.5*IQR]`, and keeps all finite values when IQR is zero. `invert_ensemble()` runs every initial row, collects solution/objective/status diagnostics, filters successful finite solutions and IQR outliers, enforces `minimum_valid_solutions`, and returns:
+`iqr_inlier_mask()` operates only on finite objectives and always applies the inclusive `[Q1-1.5*IQR, Q3+1.5*IQR]` fences, including when IQR is zero. Thus `[1, ..., 1, 100]` rejects 100 rather than invoking a keep-all exception. `invert_ensemble()` runs every initial row, collects solution/objective/status diagnostics, filters successful finite solutions and IQR outliers, enforces `minimum_valid_solutions`, and returns:
 
 ```python
 @dataclass(frozen=True)
@@ -797,7 +797,7 @@ class InversionJob:
     samples: tuple[InversionSample, ...]
 ```
 
-`build_jobs()` groups full rows by source shard and uses `select_deep_samples()` for deep rows before regrouping them by source shard. It creates one job per experiment/noise/source shard with sample tuples sorted by ID. `assigned_jobs()` selects jobs whose stable index modulo `task_count` equals `task_index`.
+`build_jobs()` groups full rows by source shard. It sorts the selected deep population by sample ID and partitions it into stable bounded chunks (production default: 10 rows), with first/last sample IDs and the ordered-ID digest in each deep job name. `assigned_jobs()` selects jobs whose stable index modulo `task_count` equals `task_index`.
 
 - [ ] **Step 4: Implement one inversion job**
 

@@ -119,6 +119,10 @@ q_j=\frac{a}{a+|V_{S,\mathrm{ref},j+1}-V_{S,\mathrm{ref},j}|},
 
 如果有效解少于配置要求的最小值（正式配置默认为 20），样本标记为 `insufficient_valid_solutions`，但仍保留所有诊断信息。
 
+四分位距围栏始终使用闭区间
+`[Q1 - 1.5*IQR, Q3 + 1.5*IQR]`。`IQR = 0` 时不采用“保留全部”的例外；
+因此九个目标值为 1、一个目标值为 100 时，100 仍作为异常值剔除。
+
 ## 4. 噪声设计
 
 每条反演样本运行两种场景：
@@ -199,7 +203,9 @@ swave invert --config configs/inversion.toml --experiment both
 swave inversion-report --results-dir results/inversion
 ```
 
-命令行可覆盖 `dataset-dir`、`checkpoint`、`output-dir`、`device`、`workers`、`task-index` 和 `task-count`。配置解析后必须重新验证完整配置，未知键不得静默忽略。
+命令行可覆盖 `dataset-dir`、`checkpoint`、`output-dir`、`device`、`workers`、
+`deep-samples-per-job`、`threads-per-worker`、`task-index` 和 `task-count`。
+配置解析后必须重新验证完整配置，未知键不得静默忽略。
 
 ## 8. 结果格式、恢复与并行
 
@@ -208,11 +214,13 @@ swave inversion-report --results-dir results/inversion
 结果目录包含一个清单，绑定：
 
 - 数据集配置哈希；
+- 经分片校验和验证后的规范数据集清单哈希；
 - 检查点 SHA-256；
 - 划分协议；
 - 完整反演配置哈希；
-- 软件版本和创建时间；
+- `swave` Python 源文件相对路径、文件字节和包版本的不可变软件哈希，以及创建时间；
 - 预期结果分片及完成状态；
+- 每个作业预期的样本数和有序 `sample_id` 哈希；
 - 每个结果文件的 SHA-256。
 
 任何身份不一致均拒绝恢复，避免将不同实验混在同一目录。
@@ -223,12 +231,17 @@ swave inversion-report --results-dir results/inversion
 
 单个样本失败时记录状态并继续该分片；分片结构损坏、样本身份不匹配或配置冲突则终止任务。
 
+结果格式版本 3 不迁移未完成的版本 2 目录；旧目录必须明确拒绝，并在新输出目录重新运行。深度样本按默认 10 条的有界块原子发布，使一次中断最多重做一个块。
+
 ### 8.3 并行
 
-- 单机 CPU 使用 `workers` 按样本并行，每个进程独立加载只读检查点。
+- 单机 CPU 使用 `workers` 按有界深度样本块并行，每个进程每个作业只加载一次只读检查点；正式默认每个深度作业 10 条样本。
+- 父进程最多维持 `workers` 个在途作业；子进程显式限制 Torch 与 BLAS 线程，防止进程并行和库内并行相乘。
 - 集群使用 `task-index` 和 `task-count` 按结果分片取模分配，任务集合互斥且并集覆盖全部分片。
 - CUDA 默认单进程，避免多个进程争用同一设备；集群多 GPU 由外部调度器为每个任务分配独立可见设备。
 - 无论 worker 数或任务数如何变化，样本、噪声和初始模型均保持确定性。
+
+深度结果将反演总体状态与物理复算状态分开保存。物理复算失败不得把已满足最少有效解数量的反演改为失败；其中位模型、代理重构和不确定性仍参与相应指标，物理曲线以零有效单元计入缺失率分母。每个初始模型还保存迭代数、函数调用数、初始/最终目标、状态、稳定失败码、消息和 IQR 内点标记。
 
 ## 9. 代码边界
 

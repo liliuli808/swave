@@ -198,6 +198,8 @@ def _invert(arguments: argparse.Namespace) -> int:
             ),
             "device": arguments.device,
             "workers": arguments.workers,
+            "deep_samples_per_job": arguments.deep_samples_per_job,
+            "threads_per_worker": arguments.threads_per_worker,
             "task_index": arguments.task_index,
             "task_count": arguments.task_count,
         }.items()
@@ -314,6 +316,8 @@ def _build_parser() -> argparse.ArgumentParser:
     inversion.add_argument("--output-dir")
     inversion.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"))
     inversion.add_argument("--workers", type=int)
+    inversion.add_argument("--deep-samples-per-job", type=int)
+    inversion.add_argument("--threads-per-worker", type=int)
     inversion.add_argument("--task-index", type=int)
     inversion.add_argument("--task-count", type=int)
     inversion.set_defaults(handler=_invert)

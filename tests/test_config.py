@@ -1,3 +1,4 @@
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from swave.config import (
     InversionConfig,
     PhysicsConfig,
     canonical_hash,
+    inversion_identity_hash,
     load_dataset_config,
     load_inversion_config,
 )
@@ -55,6 +57,8 @@ def test_inversion_defaults_match_approved_experiment() -> None:
     assert config.initial_models == 100
     assert config.samples_per_kind == 100
     assert config.minimum_valid_solutions == 20
+    assert config.deep_samples_per_job == 10
+    assert config.threads_per_worker == 1
 
 
 def test_inversion_config_rejects_invalid_cluster_and_unknown_key(tmp_path) -> None:
@@ -65,3 +69,40 @@ def test_inversion_config_rejects_invalid_cluster_and_unknown_key(tmp_path) -> N
     path.write_text("[inversion]\nunknown = 1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="unknown inversion keys"):
         load_inversion_config(path)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"seed": -1}, "seed"),
+        ({"mode_weights": (4.0, 1.0, 1.0, float("nan"))}, "mode_weights"),
+        ({"regularization_lambda": float("inf")}, "regularization_lambda"),
+        ({"relative_tolerance": float("nan")}, "relative_tolerance"),
+        ({"vs_min": 0.299}, "supported"),
+        ({"vs_max": 2.601}, "supported"),
+        ({"noise_scenarios": ("clean", "clean")}, "unique"),
+        ({"max_iterations": True}, "max_iterations"),
+        ({"workers": False}, "workers"),
+        ({"task_count": 1.0}, "task_count"),
+        ({"deep_samples_per_job": 0}, "deep_samples_per_job"),
+        ({"threads_per_worker": True}, "threads_per_worker"),
+    ],
+)
+def test_inversion_config_rejects_noncanonical_values_before_execution(
+    changes: dict[str, object], message: str
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        InversionConfig(**changes)
+
+
+def test_inversion_scientific_hash_excludes_new_operational_controls() -> None:
+    base = InversionConfig()
+    operational = dataclasses.replace(
+        base,
+        deep_samples_per_job=7,
+        threads_per_worker=2,
+        workers=3,
+        task_index=2,
+        task_count=4,
+    )
+    assert inversion_identity_hash(operational) == inversion_identity_hash(base)

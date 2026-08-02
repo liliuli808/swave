@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
+import re
 from concurrent.futures import Future
 from dataclasses import replace
 from pathlib import Path
@@ -88,11 +89,61 @@ def test_both_jobs_include_full_and_deep_families_for_tiny_data(
         samples_per_kind=1,
     )
 
-    assert [job.name for job in jobs] == [
-        "full-clean-shard-00000",
-        "deep-clean-shard-00000",
-    ]
+    assert jobs[0].name == "full-clean-shard-00000"
+    assert re.fullmatch(
+        r"deep-clean-samples-[0-9]{20}-[0-9]{20}-[0-9a-f]{12}",
+        jobs[1].name,
+    )
     assert [sample.sample_id for sample in jobs[1].samples] == [90, 91, 92, 93]
+
+
+def test_production_deep_selection_is_chunked_balanced_and_bounded(
+    monkeypatch,
+) -> None:
+    selected = tuple(_sample(90 + 100 * index) for index in range(400))
+    monkeypatch.setattr(
+        runner_module,
+        "select_deep_samples",
+        lambda dataset_dir, per_kind: list(selected),
+    )
+
+    jobs = build_jobs(
+        Path("unused-validated-dataset"),
+        "deep",
+        ("clean", "noise_1pct"),
+        samples_per_kind=100,
+        deep_samples_per_job=10,
+    )
+
+    assert len(jobs) == 80
+    assert all(1 <= len(job.samples) <= 10 for job in jobs)
+    assert max(len(job.samples) * 100 for job in jobs) == 1_000
+    assert all(
+        re.fullmatch(
+            r"deep-(clean|noise_1pct)-samples-[0-9]{20}-[0-9]{20}-[0-9a-f]{12}",
+            job.name,
+        )
+        for job in jobs
+    )
+    for job in jobs:
+        assert f"{job.samples[0].sample_id:020d}" in job.name
+        assert f"{job.samples[-1].sample_id:020d}" in job.name
+
+    assignments = [
+        assigned_jobs(jobs, task_index=index, task_count=4) for index in range(4)
+    ]
+    assert [len(group) for group in assignments] == [20, 20, 20, 20]
+    assert set().union(*({job.name for job in group} for group in assignments)) == {
+        job.name for job in jobs
+    }
+    for noise in ("clean", "noise_1pct"):
+        ids = [
+            sample.sample_id
+            for job in jobs
+            if job.noise == noise
+            for sample in job.samples
+        ]
+        assert ids == [sample.sample_id for sample in selected]
 
 
 def _sample(sample_id: int, fundamental_cells: int = 120) -> InversionSample:
@@ -160,10 +211,14 @@ def full_job_context(tmp_path: Path):
     manifest = initialize_result_manifest(
         config.output_dir,
         dataset_config_hash="a" * 64,
+        dataset_manifest_sha256="d" * 64,
         checkpoint=checkpoint,
         config=config,
         experiment="full",
         expected_jobs=(job.name,),
+        expected_sample_ids_by_job={
+            job.name: np.array([90, 91, 92, 93], dtype=np.uint64)
+        },
     )
     return config, job, manifest
 
@@ -274,10 +329,12 @@ def _deep_context(tmp_path: Path):
     manifest = initialize_result_manifest(
         config.output_dir,
         dataset_config_hash="a" * 64,
+        dataset_manifest_sha256="d" * 64,
         checkpoint=checkpoint,
         config=config,
         experiment="deep",
         expected_jobs=(job.name,),
+        expected_sample_ids_by_job={job.name: np.array([90], dtype=np.uint64)},
     )
     return config, job, manifest
 
@@ -323,6 +380,21 @@ def test_deep_job_revalidates_only_sufficient_median_and_nan_masks_invalid_cells
     assert batch.failure_code.tolist() == [b""]
     assert batch.physical_valid_mask is not None
     assert batch.physical_phase_velocity is not None
+    assert batch.physical_success is not None
+    assert batch.physical_status is not None
+    assert batch.physical_failure_code is not None
+    assert batch.physical_success.tolist() == [True]
+    assert batch.physical_status.tolist() == [0]
+    assert batch.physical_failure_code.tolist() == [b""]
+    assert batch.ensemble_iterations is not None
+    assert batch.ensemble_evaluations is not None
+    assert batch.ensemble_initial_objective is not None
+    assert batch.ensemble_failure_code is not None
+    assert batch.ensemble_message is not None
+    assert batch.ensemble_iterations.tolist() == [[4, 4, 4]]
+    assert batch.ensemble_evaluations.tolist() == [[5, 5, 5]]
+    assert batch.ensemble_initial_objective.tolist() == [[2.0, 2.0, 2.0]]
+    assert batch.ensemble_failure_code.tolist() == [[b"", b"", b""]]
     assert not batch.physical_valid_mask[0, 3, 0]
     assert np.isnan(batch.physical_phase_velocity[0, 3, 0])
 
@@ -390,8 +462,14 @@ def test_deep_job_records_physical_solver_exception_without_fabricating_success(
         config.output_dir / f"{job.name}.h5", manifest=completed
     )
 
-    assert batch.success.tolist() == [False]
-    assert batch.failure_code.tolist() == [b"physical_solver_failure"]
+    assert batch.success.tolist() == [True]
+    assert batch.failure_code.tolist() == [b""]
+    assert batch.physical_success is not None
+    assert batch.physical_status is not None
+    assert batch.physical_failure_code is not None
+    assert batch.physical_success.tolist() == [False]
+    assert batch.physical_status.tolist() == [-1]
+    assert batch.physical_failure_code.tolist() == [b"physical_solver_failure"]
     assert np.all(np.isfinite(batch.inverted_vs))
     assert batch.physical_phase_velocity is not None
     assert np.all(np.isnan(batch.physical_phase_velocity))
@@ -478,6 +556,14 @@ def _patch_successful_execution(monkeypatch) -> None:
     )
 
 
+def test_encoded_optimizer_message_is_bounded_printable_utf8() -> None:
+    encoded = runner_module._encoded_message("multi-byte: " + "多" * 300 + "\nnext")
+
+    decoded = encoded.decode("utf-8")
+    assert len(encoded) <= 512
+    assert all(character.isprintable() for character in decoded)
+
+
 def test_tiny_both_experiment_is_exactly_resumable(
     monkeypatch,
     tiny_complete_dataset: Path,
@@ -492,12 +578,11 @@ def test_tiny_both_experiment_is_exactly_resumable(
     mtimes = {path.name: path.stat().st_mtime_ns for path in paths}
 
     assert first.complete
-    assert [path.stem for path in paths] == [
-        "deep-clean-shard-00000",
-        "deep-noise_1pct-shard-00000",
-        "full-clean-shard-00000",
-        "full-noise_1pct-shard-00000",
-    ]
+    stems = [path.stem for path in paths]
+    assert "full-clean-shard-00000" in stems
+    assert "full-noise_1pct-shard-00000" in stems
+    assert sum(name.startswith("deep-clean-samples-") for name in stems) == 1
+    assert sum(name.startswith("deep-noise_1pct-samples-") for name in stems) == 1
     for path in paths:
         batch = validate_result_shard(path, manifest=first)
         assert all(int(sample_id) % 100 >= 90 for sample_id in batch.sample_id)
@@ -515,6 +600,9 @@ def test_tiny_both_experiment_is_exactly_resumable(
 
     with pytest.raises(ValueError, match="identity"):
         run_inversion_experiment(replace(config, regularization_lambda=0.02), "both")
+
+    with pytest.raises(ValueError, match="identity"):
+        run_inversion_experiment(replace(config, deep_samples_per_job=2), "both")
 
 
 def test_valid_published_shard_is_recovered_after_pre_manifest_crash(
@@ -648,7 +736,9 @@ def test_cpu_workers_submit_each_job_with_spawn_context(
     executor_calls = []
 
     class RecordingExecutor:
-        def __init__(self, *, max_workers, mp_context) -> None:
+        def __init__(
+            self, *, max_workers, mp_context, initializer=None, initargs=()
+        ) -> None:
             executor_calls.append((max_workers, mp_context.get_start_method()))
 
         def __enter__(self):
@@ -692,7 +782,9 @@ def test_cpu_auto_workers_resolve_to_available_pending_jobs(
     submitted_workers: list[int] = []
 
     class RecordingExecutor:
-        def __init__(self, *, max_workers, mp_context) -> None:
+        def __init__(
+            self, *, max_workers, mp_context, initializer=None, initargs=()
+        ) -> None:
             executor_calls.append((max_workers, mp_context.get_start_method()))
 
         def __enter__(self):
@@ -714,6 +806,72 @@ def test_cpu_auto_workers_resolve_to_available_pending_jobs(
     assert executor_calls == [(2, "spawn")]
     assert submitted_workers == [2, 2]
     assert manifest.complete
+
+
+def test_parallel_submission_is_rolling_bounded_and_initializes_thread_limits(
+    monkeypatch,
+    tiny_complete_dataset: Path,
+    tiny_checkpoint: Path,
+    tmp_path: Path,
+) -> None:
+    config = replace(
+        _runnable_config(tiny_complete_dataset, tiny_checkpoint, tmp_path),
+        workers=2,
+        threads_per_worker=1,
+        noise_scenarios=("clean",),
+    )
+    jobs = tuple(
+        InversionJob(
+            name=f"full-clean-shard-{index:05d}",
+            experiment="full",
+            noise="clean",
+            samples=(_sample(90 + 100 * index),),
+        )
+        for index in range(7)
+    )
+    monkeypatch.setattr(runner_module, "build_jobs", lambda *args, **kwargs: jobs)
+    monkeypatch.setattr(
+        runner_module,
+        "run_inversion_job",
+        lambda *args, **kwargs: args[-1],
+    )
+    outstanding = 0
+    maximum_outstanding = 0
+    constructor: list[tuple[int, object, tuple[object, ...]]] = []
+
+    class CountingFuture(Future):
+        def result(self, timeout=None):
+            nonlocal outstanding
+            outstanding -= 1
+            return super().result(timeout)
+
+    class RecordingExecutor:
+        def __init__(
+            self, *, max_workers, mp_context, initializer=None, initargs=()
+        ) -> None:
+            constructor.append((max_workers, initializer, initargs))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            return None
+
+        def submit(self, function, *args) -> Future:
+            nonlocal outstanding, maximum_outstanding
+            outstanding += 1
+            maximum_outstanding = max(maximum_outstanding, outstanding)
+            future = CountingFuture()
+            future.set_result(None)
+            return future
+
+    monkeypatch.setattr(runner_module, "ProcessPoolExecutor", RecordingExecutor)
+
+    manifest = run_inversion_experiment(config, "full")
+
+    assert not manifest.complete
+    assert maximum_outstanding == 2
+    assert constructor == [(2, runner_module._configure_child_threads, (1,))]
 
 
 def test_cuda_auto_workers_resolve_to_one_and_run_sequentially(

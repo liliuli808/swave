@@ -65,16 +65,14 @@ def load_manifest(path: Path | str) -> Manifest:
         expected_shards=int(payload["expected_shards"]),
         completed_shards=tuple(int(value) for value in payload["completed_shards"]),
         accepted_by_kind={
-            str(key): int(value)
-            for key, value in payload["accepted_by_kind"].items()
+            str(key): int(value) for key, value in payload["accepted_by_kind"].items()
         },
         rejected_by_kind={
             str(key): int(value)
             for key, value in payload.get("rejected_by_kind", {}).items()
         },
         rejected_by_reason={
-            str(key): int(value)
-            for key, value in payload["rejected_by_reason"].items()
+            str(key): int(value) for key, value in payload["rejected_by_reason"].items()
         },
         recovered_models=int(payload["recovered_models"]),
         package_version=str(payload.get("package_version", "")),
@@ -85,6 +83,20 @@ def load_manifest(path: Path | str) -> Manifest:
         },
         complete=bool(payload["complete"]),
     )
+
+
+def dataset_manifest_sha256(manifest: Manifest) -> str:
+    """Hash the canonical immutable dataset manifest, including shard checksums."""
+    if not isinstance(manifest, Manifest):
+        raise TypeError("manifest must be a dataset Manifest")
+    payload = asdict(manifest)
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _write_manifest(path: Path, manifest: Manifest) -> None:
@@ -251,12 +263,8 @@ def generate_shard(shard_id: int, config: DatasetConfig) -> ShardResult:
         handle.attrs["recovered_models"] = recovered_models
         handle.create_dataset("sample_id", data=sample_ids, dtype="u8")
         handle.create_dataset("model_kind", data=kinds, dtype="u1")
-        _create_compressed(
-            handle, "vs", vs, "f4", (chunk_rows, config.geology.layers)
-        )
-        _create_compressed(
-            handle, "vp", vp, "f4", (chunk_rows, config.geology.layers)
-        )
+        _create_compressed(handle, "vs", vs, "f4", (chunk_rows, config.geology.layers))
+        _create_compressed(handle, "vp", vp, "f4", (chunk_rows, config.geology.layers))
         _create_compressed(
             handle,
             "density",
@@ -338,16 +346,13 @@ def validate_dataset_files(dataset_dir: Path | str) -> Manifest:
                     int(handle.attrs.get("schema_version", -1))
                     != manifest.schema_version
                     or int(handle.attrs.get("shard_id", -1)) != shard_id
-                    or str(handle.attrs.get("config_hash", ""))
-                    != manifest.config_hash
+                    or str(handle.attrs.get("config_hash", "")) != manifest.config_hash
                 ):
                     raise ValueError(
                         f"dataset shard {shard_id} identity does not match"
                     )
         except OSError as error:
-            raise ValueError(
-                f"dataset shard {shard_id} is not readable"
-            ) from error
+            raise ValueError(f"dataset shard {shard_id} is not readable") from error
     return manifest
 
 
@@ -390,9 +395,7 @@ def _inspect_shard(
     try:
         with h5py.File(path, "r") as handle:
             if str(handle.attrs.get("config_hash", "")) != canonical_hash(config):
-                raise ValueError(
-                    f"shard {shard_id} configuration hash does not match"
-                )
+                raise ValueError(f"shard {shard_id} configuration hash does not match")
             expected = {
                 "schema_version": SCHEMA_VERSION,
                 "shard_id": shard_id,
@@ -416,9 +419,7 @@ def _inspect_shard(
                     )
 
             sample_ids = np.asarray(handle["sample_id"], dtype=np.uint64)
-            expected_ids = np.arange(
-                expected_first, expected_stop, dtype=np.uint64
-            )
+            expected_ids = np.arange(expected_first, expected_stop, dtype=np.uint64)
             if not np.array_equal(sample_ids, expected_ids):
                 raise ValueError(f"shard {shard_id} sample_id values are invalid")
             id_digest = hashlib.sha256(sample_ids.tobytes()).hexdigest()
@@ -458,9 +459,7 @@ def _inspect_shard(
             if np.any(kinds > 3) or np.any(retries > config.max_model_retries):
                 raise ValueError(f"shard {shard_id} has invalid provenance values")
             accepted = json.loads(str(handle.attrs["accepted_by_kind"]))
-            rejected_kinds = json.loads(
-                str(handle.attrs.get("rejected_by_kind", "{}"))
-            )
+            rejected_kinds = json.loads(str(handle.attrs.get("rejected_by_kind", "{}")))
             rejected = json.loads(str(handle.attrs["rejected_by_reason"]))
             recovered = int(handle.attrs["recovered_models"])
     except OSError as error:
@@ -476,9 +475,7 @@ def _inspect_shard(
         rejected_by_kind={
             str(key): int(value) for key, value in rejected_kinds.items()
         },
-        rejected_by_reason={
-            str(key): int(value) for key, value in rejected.items()
-        },
+        rejected_by_reason={str(key): int(value) for key, value in rejected.items()},
         recovered_models=recovered,
         file_sha256=file_sha256,
     )
@@ -513,8 +510,7 @@ def _manifest_from_results(
         package_version=__version__,
         created_at=created_at,
         shard_sha256={
-            str(shard_id): results[shard_id].file_sha256
-            for shard_id in completed
+            str(shard_id): results[shard_id].file_sha256 for shard_id in completed
         },
         complete=len(completed) == expected_shards,
     )
@@ -545,9 +541,7 @@ def generate_dataset(config: DatasetConfig) -> Manifest:
     missing: list[int] = []
     for shard_id in range(expected_shards):
         expected_checksum = (
-            previous.shard_sha256.get(str(shard_id))
-            if previous is not None
-            else None
+            previous.shard_sha256.get(str(shard_id)) if previous is not None else None
         )
         result = _inspect_shard(shard_id, config, expected_checksum)
         if result is None:
@@ -555,9 +549,7 @@ def generate_dataset(config: DatasetConfig) -> Manifest:
         else:
             results[shard_id] = result
 
-    manifest = _manifest_from_results(
-        config, expected_shards, results, created_at
-    )
+    manifest = _manifest_from_results(config, expected_shards, results, created_at)
     _write_manifest(manifest_path, manifest)
     if not missing:
         return manifest

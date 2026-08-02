@@ -5,6 +5,7 @@ import h5py
 import numpy as np
 import pytest
 
+import swave.dataset as dataset_module
 from swave.config import DatasetConfig
 from swave.dataset import generate_dataset, load_manifest
 
@@ -41,6 +42,21 @@ def test_smoke_dataset_has_declared_schema(tmp_path: Path) -> None:
         assert handle["quality_flags"].dtype == np.dtype("u2")
         assert handle["retry_count"].dtype == np.dtype("u1")
         assert handle.attrs["accepted_count"] == 2
+
+
+def test_dataset_manifest_digest_is_canonical_and_checksum_sensitive(
+    tmp_path: Path,
+) -> None:
+    manifest = generate_dataset(_smoke_config(tmp_path))
+    first = dataset_module.dataset_manifest_sha256(manifest)
+    assert first == dataset_module.dataset_manifest_sha256(
+        load_manifest(tmp_path / "manifest.json")
+    )
+    changed = replace(
+        manifest,
+        shard_sha256={"0": "f" * 64},
+    )
+    assert dataset_module.dataset_manifest_sha256(changed) != first
 
 
 def test_resume_does_not_rewrite_complete_shard(tmp_path: Path) -> None:

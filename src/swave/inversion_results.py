@@ -8,7 +8,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
@@ -23,7 +23,7 @@ from . import __version__
 from .config import InversionConfig, inversion_identity_hash
 from .splits import SPLIT_POLICY
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 VS_MIN = 0.3
 VS_MAX = 2.6
 CURVE_SHAPE = (4, 120)
@@ -53,11 +53,19 @@ _OPTIONAL_DATASETS = (
     "ensemble_vs",
     "ensemble_success",
     "ensemble_status",
+    "ensemble_iterations",
+    "ensemble_evaluations",
+    "ensemble_initial_objective",
     "ensemble_objective",
+    "ensemble_failure_code",
+    "ensemble_message",
     "ensemble_inlier_mask",
     "median_vs",
     "p10_vs",
     "p90_vs",
+    "physical_success",
+    "physical_status",
+    "physical_failure_code",
     "physical_phase_velocity",
     "physical_valid_mask",
 )
@@ -65,11 +73,13 @@ _ALL_DATASETS = _REQUIRED_DATASETS + _OPTIONAL_DATASETS
 _IDENTITY_ATTRS = (
     "schema_version",
     "dataset_config_hash",
+    "dataset_manifest_sha256",
     "checkpoint_sha256",
     "split_policy",
     "inversion_config_hash",
     "experiment",
     "package_version",
+    "software_sha256",
 )
 
 
@@ -111,6 +121,25 @@ def _require_array(
     return value
 
 
+def _require_bytes_array(
+    value: object,
+    name: str,
+    shape: tuple[int, ...],
+    *,
+    maximum_width: int,
+) -> NDArray[np.bytes_]:
+    if (
+        not isinstance(value, np.ndarray)
+        or value.shape != shape
+        or value.dtype.kind != "S"
+        or not 1 <= value.dtype.itemsize <= maximum_width
+    ):
+        raise ValueError(
+            f"{name} must have shape {shape} and a fixed-width bytes dtype"
+        )
+    return value
+
+
 def _row_is_all_nan(values: NDArray[Any]) -> NDArray[np.bool_]:
     flattened = values.reshape(values.shape[0], -1)
     return np.asarray(np.all(np.isnan(flattened), axis=1), dtype=np.bool_)
@@ -133,7 +162,7 @@ def _validate_profile_rows(values: NDArray[Any], name: str) -> NDArray[np.bool_]
 
 def _decode_failure_codes(values: NDArray[np.bytes_]) -> tuple[str, ...]:
     decoded: list[str] = []
-    for raw in values:
+    for raw in values.reshape(-1):
         try:
             text = bytes(raw).decode("ascii")
         except UnicodeDecodeError as error:
@@ -144,21 +173,86 @@ def _decode_failure_codes(values: NDArray[np.bytes_]) -> tuple[str, ...]:
     return tuple(decoded)
 
 
+def _decode_messages(values: NDArray[np.bytes_]) -> tuple[str, ...]:
+    decoded: list[str] = []
+    for raw in values.reshape(-1):
+        try:
+            text = bytes(raw).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("ensemble_message must contain UTF-8 bytes") from error
+        if not text or any(ord(character) < 32 for character in text):
+            raise ValueError("ensemble_message must contain nonempty printable text")
+        decoded.append(text)
+    return tuple(decoded)
+
+
+def sample_id_sha256(values: NDArray[np.uint64]) -> str:
+    """Hash one nonempty, strictly ordered uint64 sample population."""
+    sample_ids = np.asarray(values)
+    if sample_ids.dtype != np.dtype(np.uint64) or sample_ids.ndim != 1:
+        raise ValueError("sample IDs must be a uint64 vector")
+    if sample_ids.size == 0:
+        raise ValueError("sample IDs must be nonempty")
+    if sample_ids.size > 1 and not np.all(sample_ids[1:] > sample_ids[:-1]):
+        raise ValueError("sample IDs must be unique and strictly ordered")
+    canonical = np.asarray(sample_ids, dtype="<u8")
+    digest = hashlib.sha256()
+    digest.update(int(canonical.size).to_bytes(8, "big"))
+    digest.update(canonical.tobytes())
+    return digest.hexdigest()
+
+
+def software_sha256(
+    package_root: Path | str | None = None,
+    *,
+    package_version: str | None = None,
+) -> str:
+    """Hash installed swave Python sources by canonical relative name and bytes."""
+    root = (
+        Path(__file__).resolve().parent if package_root is None else Path(package_root)
+    )
+    version = __version__ if package_version is None else package_version
+    if not isinstance(version, str) or not version:
+        raise ValueError("package_version must be a nonempty string")
+    paths = sorted(
+        (path for path in root.rglob("*.py") if path.is_file()),
+        key=lambda path: path.relative_to(root).as_posix(),
+    )
+    if not paths:
+        raise ValueError("software package contains no Python source files")
+    digest = hashlib.sha256()
+    version_bytes = version.encode("utf-8")
+    digest.update(len(version_bytes).to_bytes(8, "big"))
+    digest.update(version_bytes)
+    for path in paths:
+        name = path.relative_to(root).as_posix().encode("utf-8")
+        content = path.read_bytes()
+        digest.update(len(name).to_bytes(8, "big"))
+        digest.update(name)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class ResultManifest:
     """Immutable identity and completion index for one inversion run."""
 
     schema_version: int
     dataset_config_hash: str
+    dataset_manifest_sha256: str
     checkpoint_sha256: str
     split_policy: str
     inversion_config_hash: str
     minimum_valid_solutions: int | None
     experiment: str
     expected_jobs: tuple[str, ...]
+    expected_job_sample_count: dict[str, int]
+    expected_job_sample_id_sha256: dict[str, str]
     completed_jobs: tuple[str, ...]
     job_sha256: dict[str, str]
     package_version: str
+    software_sha256: str
     created_at: str
     complete: bool
 
@@ -169,8 +263,10 @@ class ResultManifest:
         ):
             raise ValueError("result manifest schema version is unsupported")
         _require_hash(self.dataset_config_hash, "dataset_config_hash")
+        _require_hash(self.dataset_manifest_sha256, "dataset_manifest_sha256")
         _require_hash(self.checkpoint_sha256, "checkpoint_sha256")
         _require_hash(self.inversion_config_hash, "inversion_config_hash")
+        _require_hash(self.software_sha256, "software_sha256")
         if self.split_policy != SPLIT_POLICY:
             raise ValueError("result manifest split policy does not match")
         if self.experiment not in {"full", "deep", "both"}:
@@ -194,6 +290,26 @@ class ResultManifest:
         completed = tuple(_require_job_name(job) for job in self.completed_jobs)
         if len(set(expected)) != len(expected):
             raise ValueError("expected_jobs contains duplicate jobs")
+        if not isinstance(self.expected_job_sample_count, dict) or set(
+            self.expected_job_sample_count
+        ) != set(expected):
+            raise ValueError(
+                "expected_job_sample_count keys must exactly match expected_jobs"
+            )
+        if not isinstance(self.expected_job_sample_id_sha256, dict) or set(
+            self.expected_job_sample_id_sha256
+        ) != set(expected):
+            raise ValueError(
+                "expected_job_sample_id_sha256 keys must exactly match expected_jobs"
+            )
+        for job in expected:
+            count = self.expected_job_sample_count[job]
+            if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+                raise ValueError("expected job sample counts must be positive integers")
+            _require_hash(
+                self.expected_job_sample_id_sha256[job],
+                f"expected_job_sample_id_sha256[{job!r}]",
+            )
         job_experiments = {_job_experiment(job) for job in expected}
         if self.experiment == "both" and job_experiments != {"full", "deep"}:
             raise ValueError(
@@ -233,6 +349,14 @@ class ResultManifest:
         if self.complete != actually_complete:
             raise ValueError("manifest complete flag disagrees with completed_jobs")
         object.__setattr__(self, "job_sha256", dict(self.job_sha256))
+        object.__setattr__(
+            self, "expected_job_sample_count", dict(self.expected_job_sample_count)
+        )
+        object.__setattr__(
+            self,
+            "expected_job_sample_id_sha256",
+            dict(self.expected_job_sample_id_sha256),
+        )
 
 
 @dataclass(frozen=True)
@@ -258,11 +382,19 @@ class ResultBatch:
     ensemble_vs: NDArray[np.float32] | None = None
     ensemble_success: NDArray[np.bool_] | None = None
     ensemble_status: NDArray[np.int32] | None = None
+    ensemble_iterations: NDArray[np.int32] | None = None
+    ensemble_evaluations: NDArray[np.int32] | None = None
+    ensemble_initial_objective: NDArray[np.float64] | None = None
     ensemble_objective: NDArray[np.float64] | None = None
+    ensemble_failure_code: NDArray[np.bytes_] | None = None
+    ensemble_message: NDArray[np.bytes_] | None = None
     ensemble_inlier_mask: NDArray[np.bool_] | None = None
     median_vs: NDArray[np.float32] | None = None
     p10_vs: NDArray[np.float32] | None = None
     p90_vs: NDArray[np.float32] | None = None
+    physical_success: NDArray[np.bool_] | None = None
+    physical_status: NDArray[np.int32] | None = None
+    physical_failure_code: NDArray[np.bytes_] | None = None
     physical_phase_velocity: NDArray[np.float32] | None = None
     physical_valid_mask: NDArray[np.bool_] | None = None
 
@@ -395,13 +527,46 @@ class ResultBatch:
         expected_ensemble = {
             "ensemble_success": np.bool_,
             "ensemble_status": np.int32,
+            "ensemble_iterations": np.int32,
+            "ensemble_evaluations": np.int32,
+            "ensemble_initial_objective": np.float64,
             "ensemble_objective": np.float64,
             "ensemble_inlier_mask": np.bool_,
         }
         for name, dtype in expected_ensemble.items():
             _require_array(getattr(self, name), name, dtype, (count, starts))
+        _require_bytes_array(
+            self.ensemble_failure_code,
+            "ensemble_failure_code",
+            (count, starts),
+            maximum_width=128,
+        )
+        _require_bytes_array(
+            self.ensemble_message,
+            "ensemble_message",
+            (count, starts),
+            maximum_width=512,
+        )
         for name in ("median_vs", "p10_vs", "p90_vs"):
             _require_array(getattr(self, name), name, np.float32, (count, 20))
+        _require_array(
+            self.physical_success,
+            "physical_success",
+            np.bool_,
+            (count,),
+        )
+        _require_array(
+            self.physical_status,
+            "physical_status",
+            np.int32,
+            (count,),
+        )
+        _require_bytes_array(
+            self.physical_failure_code,
+            "physical_failure_code",
+            (count,),
+            maximum_width=128,
+        )
         _require_array(
             self.physical_phase_velocity,
             "physical_phase_velocity",
@@ -416,8 +581,33 @@ class ResultBatch:
         )
 
         assert self.ensemble_success is not None
+        assert self.ensemble_iterations is not None
+        assert self.ensemble_evaluations is not None
+        assert self.ensemble_initial_objective is not None
         assert self.ensemble_objective is not None
+        assert self.ensemble_failure_code is not None
+        assert self.ensemble_message is not None
         assert self.ensemble_inlier_mask is not None
+        if np.any(self.ensemble_iterations < 0):
+            raise ValueError("ensemble_iterations must be nonnegative")
+        if np.any(self.ensemble_evaluations < 0):
+            raise ValueError("ensemble_evaluations must be nonnegative")
+        initial_finite = np.isfinite(self.ensemble_initial_objective)
+        initial_nan = np.isnan(self.ensemble_initial_objective)
+        if not np.all(initial_finite | initial_nan) or np.any(
+            self.ensemble_initial_objective[initial_finite] < 0
+        ):
+            raise ValueError(
+                "ensemble_initial_objective must contain nonnegative finite values or NaN"
+            )
+        start_codes = np.asarray(
+            _decode_failure_codes(self.ensemble_failure_code)
+        ).reshape(count, starts)
+        _decode_messages(self.ensemble_message)
+        if np.any(self.ensemble_success != (start_codes == "")):
+            raise ValueError(
+                "ensemble_failure_code must be empty exactly for successful starts"
+            )
         flat_vs = ensemble_vs.reshape(count * starts, 20)
         vs_finite = _validate_profile_rows(flat_vs, "ensemble_vs").reshape(
             count, starts
@@ -432,6 +622,10 @@ class ResultBatch:
             raise ValueError("successful ensemble starts must contain bounded Vs")
         if not np.all(objective_finite[self.ensemble_success]):
             raise ValueError("successful ensemble starts need finite objectives")
+        if not np.all(initial_finite[self.ensemble_success]):
+            raise ValueError(
+                "successful ensemble starts need finite initial objectives"
+            )
         failed = ~self.ensemble_success
         failed_consistent = (vs_finite & objective_finite) | (
             ~vs_finite & objective_nan
@@ -465,6 +659,9 @@ class ResultBatch:
 
         assert self.physical_phase_velocity is not None
         assert self.physical_valid_mask is not None
+        assert self.physical_success is not None
+        assert self.physical_status is not None
+        assert self.physical_failure_code is not None
         if not np.array_equal(
             self.physical_valid_mask,
             np.isfinite(self.physical_phase_velocity),
@@ -477,8 +674,35 @@ class ResultBatch:
         if np.any(self.physical_phase_velocity[self.physical_valid_mask] <= 0):
             raise ValueError("valid physical phase velocities must be positive")
         physical_rows = np.any(self.physical_valid_mask.reshape(count, -1), axis=1)
-        if not np.all(physical_rows[self.success]):
-            raise ValueError("successful deep rows require physical reconstruction")
+        physical_codes = np.asarray(_decode_failure_codes(self.physical_failure_code))
+        if np.any(self.physical_success != (physical_codes == "")):
+            raise ValueError(
+                "physical_failure_code must be empty exactly for successful physical rows"
+            )
+        if np.any(self.physical_success & ~self.success):
+            raise ValueError("physical success requires inversion success")
+        if not np.all(physical_rows[self.physical_success]):
+            raise ValueError(
+                "successful physical rows require at least one reconstructed cell"
+            )
+        if np.any(physical_rows[~self.physical_success]):
+            raise ValueError("failed physical rows must not publish physical cells")
+        if np.any(self.physical_status[self.physical_success] != 0):
+            raise ValueError("successful physical rows require status zero")
+        if np.any(self.physical_status[~self.physical_success] >= 0):
+            raise ValueError("failed physical rows require a negative status")
+        not_attempted = ~self.success
+        if np.any(physical_codes[not_attempted] != "not_attempted") or np.any(
+            self.physical_status[not_attempted] != -2
+        ):
+            raise ValueError(
+                "failed inversions require a canonical not-attempted physical outcome"
+            )
+        attempted_failure = self.success & ~self.physical_success
+        if np.any(physical_codes[attempted_failure] == "not_attempted"):
+            raise ValueError(
+                "successful inversions with physical failure require a failure code"
+            )
 
 
 def _reject_symlink(path: Path, description: str) -> None:
@@ -611,6 +835,11 @@ def _load_manifest(path: Path) -> ResultManifest:
             )
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError("result manifest is not readable JSON") from error
+    if isinstance(payload, dict) and payload.get("schema_version") == 2:
+        raise ValueError(
+            "result manifest schema version 2 is unsupported; create a new "
+            "schema v3 result directory"
+        )
     expected_fields = {field.name for field in fields(ResultManifest)}
     if not isinstance(payload, dict) or set(payload) != expected_fields:
         raise ValueError("result manifest fields do not match the schema")
@@ -628,15 +857,21 @@ def _load_manifest(path: Path) -> ResultManifest:
         return ResultManifest(
             schema_version=payload["schema_version"],
             dataset_config_hash=payload["dataset_config_hash"],
+            dataset_manifest_sha256=payload["dataset_manifest_sha256"],
             checkpoint_sha256=payload["checkpoint_sha256"],
             split_policy=payload["split_policy"],
             inversion_config_hash=payload["inversion_config_hash"],
             minimum_valid_solutions=payload["minimum_valid_solutions"],
             experiment=payload["experiment"],
             expected_jobs=tuple(payload["expected_jobs"]),
+            expected_job_sample_count=dict(payload["expected_job_sample_count"]),
+            expected_job_sample_id_sha256=dict(
+                payload["expected_job_sample_id_sha256"]
+            ),
             completed_jobs=tuple(payload["completed_jobs"]),
             job_sha256=dict(payload["job_sha256"]),
             package_version=payload["package_version"],
+            software_sha256=payload["software_sha256"],
             created_at=payload["created_at"],
             complete=payload["complete"],
         )
@@ -648,30 +883,56 @@ def _identity(manifest: ResultManifest) -> tuple[object, ...]:
     return (
         manifest.schema_version,
         manifest.dataset_config_hash,
+        manifest.dataset_manifest_sha256,
         manifest.checkpoint_sha256,
         manifest.split_policy,
         manifest.inversion_config_hash,
         manifest.minimum_valid_solutions,
         manifest.experiment,
         manifest.expected_jobs,
-        manifest.package_version,
+        tuple(sorted(manifest.expected_job_sample_count.items())),
+        tuple(sorted(manifest.expected_job_sample_id_sha256.items())),
+        manifest.software_sha256,
     )
+
+
+def _expected_population_identity(
+    expected_jobs: tuple[str, ...],
+    expected_sample_ids_by_job: Mapping[str, NDArray[np.uint64]],
+) -> tuple[dict[str, int], dict[str, str]]:
+    if not isinstance(expected_sample_ids_by_job, Mapping) or set(
+        expected_sample_ids_by_job
+    ) != set(expected_jobs):
+        raise ValueError(
+            "expected_sample_ids_by_job keys must exactly match expected_jobs"
+        )
+    counts: dict[str, int] = {}
+    digests: dict[str, str] = {}
+    for job in expected_jobs:
+        values = np.asarray(expected_sample_ids_by_job[job])
+        digest = sample_id_sha256(values)
+        counts[job] = int(values.size)
+        digests[job] = digest
+    return counts, digests
 
 
 def initialize_result_manifest(
     results_dir: Path | str,
     *,
     dataset_config_hash: str,
+    dataset_manifest_sha256: str,
     checkpoint: Path | str,
     inversion_config_hash: str | None = None,
     config: InversionConfig | None = None,
     minimum_valid_solutions: int | None = None,
     experiment: str,
     expected_jobs: tuple[str, ...],
+    expected_sample_ids_by_job: Mapping[str, NDArray[np.uint64]],
 ) -> ResultManifest:
     """Create or safely resume the exact scientific result identity."""
     directory = _result_directory(results_dir, create=True)
     _require_hash(dataset_config_hash, "dataset_config_hash")
+    _require_hash(dataset_manifest_sha256, "dataset_manifest_sha256")
     if experiment not in {"full", "deep", "both"}:
         raise ValueError("experiment must be full, deep, or both")
     if experiment in {"deep", "both"}:
@@ -701,19 +962,26 @@ def initialize_result_manifest(
         )
         configured_minimum = None
     assert config_digest is not None
+    expected_counts, expected_digests = _expected_population_identity(
+        expected_jobs, expected_sample_ids_by_job
+    )
     checkpoint_digest = checkpoint_sha256(checkpoint)
     candidate = ResultManifest(
         schema_version=SCHEMA_VERSION,
         dataset_config_hash=dataset_config_hash,
+        dataset_manifest_sha256=dataset_manifest_sha256,
         checkpoint_sha256=checkpoint_digest,
         split_policy=SPLIT_POLICY,
         inversion_config_hash=config_digest,
         minimum_valid_solutions=configured_minimum,
         experiment=experiment,
         expected_jobs=expected_jobs,
+        expected_job_sample_count=expected_counts,
+        expected_job_sample_id_sha256=expected_digests,
         completed_jobs=(),
         job_sha256={},
         package_version=__version__,
+        software_sha256=software_sha256(),
         created_at=datetime.now(UTC).isoformat(),
         complete=False,
     )
@@ -771,7 +1039,7 @@ def _write_batch(handle: h5py.File, batch: ResultBatch) -> None:
 
 def _validate_shard_identity(
     handle: h5py.File, manifest: ResultManifest | None
-) -> tuple[str, int | None]:
+) -> tuple[str, int | None, int, str]:
     if int(handle.attrs.get("schema_version", -1)) != SCHEMA_VERSION:
         raise ValueError("result shard schema version is invalid")
     for name in _IDENTITY_ATTRS[1:]:
@@ -784,6 +1052,10 @@ def _validate_shard_identity(
         "dataset_config_hash",
     )
     _require_hash(
+        _attribute_text(handle.attrs["dataset_manifest_sha256"]),
+        "dataset_manifest_sha256",
+    )
+    _require_hash(
         _attribute_text(handle.attrs["checkpoint_sha256"]),
         "checkpoint_sha256",
     )
@@ -791,7 +1063,23 @@ def _validate_shard_identity(
         _attribute_text(handle.attrs["inversion_config_hash"]),
         "inversion_config_hash",
     )
+    _require_hash(
+        _attribute_text(handle.attrs["software_sha256"]),
+        "software_sha256",
+    )
     job = _require_job_name(_attribute_text(handle.attrs.get("job_name", "")))
+    raw_expected_count = handle.attrs.get("expected_sample_count")
+    if (
+        isinstance(raw_expected_count, (bool, np.bool_))
+        or not isinstance(raw_expected_count, (int, np.integer))
+        or int(raw_expected_count) <= 0
+    ):
+        raise ValueError("result shard expected_sample_count is invalid")
+    expected_count = int(raw_expected_count)
+    expected_sample_digest = _require_hash(
+        _attribute_text(handle.attrs.get("expected_sample_id_sha256", "")),
+        "expected_sample_id_sha256",
+    )
     raw_minimum = handle.attrs.get("minimum_valid_solutions")
     if raw_minimum is not None and (
         isinstance(raw_minimum, (bool, np.bool_))
@@ -806,15 +1094,17 @@ def _validate_shard_identity(
             "deep result shard is missing minimum_valid_solutions identity"
         )
     if manifest is None:
-        return job, shard_minimum
+        return job, shard_minimum, expected_count, expected_sample_digest
     expected_attrs = {
         "schema_version": manifest.schema_version,
         "dataset_config_hash": manifest.dataset_config_hash,
+        "dataset_manifest_sha256": manifest.dataset_manifest_sha256,
         "checkpoint_sha256": manifest.checkpoint_sha256,
         "split_policy": manifest.split_policy,
         "inversion_config_hash": manifest.inversion_config_hash,
         "experiment": manifest.experiment,
         "package_version": manifest.package_version,
+        "software_sha256": manifest.software_sha256,
     }
     for name, expected in expected_attrs.items():
         actual: object = handle.attrs.get(name, "")
@@ -828,7 +1118,11 @@ def _validate_shard_identity(
         raise ValueError("result shard job is not expected by the manifest")
     if shard_minimum != manifest.minimum_valid_solutions:
         raise ValueError("result shard minimum_valid_solutions identity does not match")
-    return job, shard_minimum
+    if expected_count != manifest.expected_job_sample_count[job]:
+        raise ValueError("result shard expected sample count does not match")
+    if expected_sample_digest != manifest.expected_job_sample_id_sha256[job]:
+        raise ValueError("result shard expected sample identity does not match")
+    return job, shard_minimum, expected_count, expected_sample_digest
 
 
 def _job_requires_deep_schema(job: str, manifest: ResultManifest | None) -> bool:
@@ -902,7 +1196,12 @@ def validate_result_shard(
     _reject_symlink(source, "result shard")
     try:
         with h5py.File(source, "r") as handle:
-            job, shard_minimum = _validate_shard_identity(handle, manifest)
+            (
+                job,
+                shard_minimum,
+                expected_sample_count,
+                expected_sample_digest,
+            ) = _validate_shard_identity(handle, manifest)
             published_name = f"{job}.h5"
             temporary_pattern = rf"{re.escape(published_name)}\.tmp-[0-9]+"
             if (
@@ -946,6 +1245,10 @@ def validate_result_shard(
     except (TypeError, ValueError) as error:
         raise ValueError(f"result shard content is invalid: {error}") from error
     _validate_batch_schema_for_job(job, batch, manifest, shard_minimum)
+    if batch.sample_id.size != expected_sample_count:
+        raise ValueError("result shard sample count does not match its identity")
+    if sample_id_sha256(batch.sample_id) != expected_sample_digest:
+        raise ValueError("result shard sample identity does not match")
     if expected_sample_ids is not None:
         expected = np.asarray(expected_sample_ids)
         if expected.dtype != np.dtype(np.uint64) or expected.ndim != 1:
@@ -965,6 +1268,13 @@ def _manifest_matches_disk(directory: Path, manifest: ResultManifest) -> None:
         raise ValueError("provided result manifest identity does not match disk")
 
 
+def _require_current_software(manifest: ResultManifest) -> None:
+    if manifest.software_sha256 != software_sha256():
+        raise ValueError(
+            "result manifest software identity does not match this checkout"
+        )
+
+
 def write_result_shard(
     results_dir: Path | str,
     job_name: str,
@@ -976,6 +1286,7 @@ def write_result_shard(
     job = _require_job_name(job_name)
     if job not in manifest.expected_jobs:
         raise ValueError("job is not expected by the result manifest")
+    _require_current_software(manifest)
     if not isinstance(batch, ResultBatch):
         raise TypeError("batch must be a ResultBatch")
     _validate_batch_schema_for_job(
@@ -995,6 +1306,9 @@ def write_result_shard(
             with h5py.File(temporary, "w") as handle:
                 handle.attrs["schema_version"] = manifest.schema_version
                 handle.attrs["dataset_config_hash"] = manifest.dataset_config_hash
+                handle.attrs["dataset_manifest_sha256"] = (
+                    manifest.dataset_manifest_sha256
+                )
                 handle.attrs["checkpoint_sha256"] = manifest.checkpoint_sha256
                 handle.attrs["split_policy"] = manifest.split_policy
                 handle.attrs["inversion_config_hash"] = manifest.inversion_config_hash
@@ -1004,7 +1318,14 @@ def write_result_shard(
                     )
                 handle.attrs["experiment"] = manifest.experiment
                 handle.attrs["package_version"] = manifest.package_version
+                handle.attrs["software_sha256"] = manifest.software_sha256
                 handle.attrs["job_name"] = job
+                handle.attrs["expected_sample_count"] = (
+                    manifest.expected_job_sample_count[job]
+                )
+                handle.attrs["expected_sample_id_sha256"] = (
+                    manifest.expected_job_sample_id_sha256[job]
+                )
                 _write_batch(handle, batch)
                 handle.attrs["sample_id_sha256"] = hashlib.sha256(
                     batch.sample_id.tobytes()
@@ -1068,6 +1389,7 @@ def mark_job_complete(
     path = _shard_path(directory, job, shard_path)
     with _locked(directory, "manifest.lock"):
         manifest = _load_manifest(directory / "manifest.json")
+        _require_current_software(manifest)
         if job not in manifest.expected_jobs:
             raise ValueError("job is not expected by the result manifest")
         validate_result_shard(path, manifest=manifest)
@@ -1084,15 +1406,19 @@ def mark_job_complete(
         updated = ResultManifest(
             schema_version=manifest.schema_version,
             dataset_config_hash=manifest.dataset_config_hash,
+            dataset_manifest_sha256=manifest.dataset_manifest_sha256,
             checkpoint_sha256=manifest.checkpoint_sha256,
             split_policy=manifest.split_policy,
             inversion_config_hash=manifest.inversion_config_hash,
             minimum_valid_solutions=manifest.minimum_valid_solutions,
             experiment=manifest.experiment,
             expected_jobs=manifest.expected_jobs,
+            expected_job_sample_count=manifest.expected_job_sample_count,
+            expected_job_sample_id_sha256=(manifest.expected_job_sample_id_sha256),
             completed_jobs=completed,
             job_sha256={name: checksums[name] for name in completed},
             package_version=manifest.package_version,
+            software_sha256=manifest.software_sha256,
             created_at=manifest.created_at,
             complete=completed == manifest.expected_jobs,
         )
@@ -1101,14 +1427,24 @@ def mark_job_complete(
 
 
 def _canonical_job_group(job: str) -> str:
-    match = re.fullmatch(r"(full|deep)-(clean|noise_1pct)-shard-[0-9]+", job)
-    return "-".join(match.groups()) if match is not None else "__generic__"
+    match = re.fullmatch(
+        r"(full)-(clean|noise_1pct)-shard-[0-9]+"
+        r"|(deep)-(clean|noise_1pct)-samples-[0-9]{20}-[0-9]{20}-[0-9a-f]{12}",
+        job,
+    )
+    if match is None:
+        return "__generic__"
+    experiment = match.group(1) or match.group(3)
+    noise = match.group(2) or match.group(4)
+    assert experiment is not None and noise is not None
+    return f"{experiment}-{noise}"
 
 
 def validate_complete_results(results_dir: Path | str) -> ResultManifest:
     """Verify the exact complete manifest, file set, hashes, and shard contents."""
     directory = _result_directory(results_dir, create=False)
     manifest = _load_manifest(directory / "manifest.json")
+    _require_current_software(manifest)
     if not manifest.complete:
         raise ValueError("result manifest is incomplete")
     if manifest.completed_jobs != manifest.expected_jobs:

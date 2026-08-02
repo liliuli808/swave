@@ -391,10 +391,10 @@ def test_lbfgsb_rejects_invalid_optimizer_results(monkeypatch, recovered) -> Non
         )
 
 
-def test_iqr_inliers_ignore_nonfinite_values_and_keep_zero_iqr_values() -> None:
+def test_iqr_inliers_ignore_nonfinite_values_and_apply_zero_iqr_fences() -> None:
     keep = iqr_inlier_mask(np.array([1.0] * 9 + [100.0, np.nan, np.inf]))
 
-    assert keep.tolist() == [True] * 10 + [False, False]
+    assert keep.tolist() == [True] * 9 + [False, False, False]
 
 
 def test_ensemble_uses_only_successful_finite_inliers_for_percentiles(

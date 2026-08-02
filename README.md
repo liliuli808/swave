@@ -159,6 +159,22 @@ multi-start experiment. Repeating the same command validates completed shards
 and resumes only missing work. Do not build the report until every expected job
 is complete.
 
+Result schema v3 binds the checksum-validated dataset manifest, checkpoint,
+scientific inversion configuration, installed `swave` Python source digest, and
+the exact ordered sample-ID count and digest for every job. A schema-v2 result
+directory cannot be resumed or reported with this release; start schema-v3 work
+in a new output directory. This strict restart rule prevents rows omitted from
+both noise scenarios, or results produced by different source checkouts that
+share version `0.1.0`, from being merged silently.
+
+Deep work is split into deterministic sample-ID-bearing chunks. The production
+default `deep_samples_per_job = 10` creates 40 chunks per noise scenario for the
+400 selected rows, so each job contains at most 1,000 sequential optimizer
+starts. Completed chunks publish atomically, and cluster task assignment is a
+disjoint modulo partition of the stable job list. Changing chunk size is an
+operational change, but its different expected-job identities intentionally
+make an incompatible resume fail.
+
 For a four-task cluster sharing the same dataset, checkpoint, configuration,
 and result directory, launch exactly these four invocations. They differ only
 in `--task-index`; `--task-count` remains 4:
@@ -181,11 +197,24 @@ swave inversion-report \
 
 The default `workers = 0` is operational auto-selection: CPU tasks use the
 available cores up to their pending-job count, while CUDA resolves to one worker
-per task. An explicit CUDA worker count other than 1 is rejected. Multi-GPU
-scheduling is external, with one visible device assigned to each cluster task.
-Task partitioning and resolved worker counts change execution ownership only;
-they do not change result identity or deterministic sample, noise, or
-initial-model seeds.
+per task. An explicit CUDA worker count other than 1 is rejected. CPU submission
+keeps at most one in-flight job per worker instead of queueing the complete run,
+and every spawned child is limited by `threads_per_worker = 1` for Torch, OpenMP,
+MKL, OpenBLAS, NumExpr, and vecLib. Multi-GPU scheduling is external, with one
+visible device assigned to each cluster task. Device, worker, thread, chunk, and
+task controls are operational; deterministic sample, noise, and initial-model
+seeds remain scientific invariants.
+
+For deep rows, `success`, `status`, and `failure_code` describe the inversion
+ensemble only. Physical Dunkin revalidation has independent success, status,
+and failure-code fields. A physical failure therefore retains the recovered
+median model, surrogate reconstruction, and P10/P90 uncertainty while
+contributing zero valid cells to physical-reconstruction missingness. Every
+start also stores iterations, evaluations, initial/final objective, status,
+failure code, message, inlier flag, and model. Reports distinguish sample
+outcomes from start convergence, include paired clean/noisy start effort and
+convergence deltas, and apply inclusive 1.5-IQR objective fences even when IQR
+is zero; for example, nine objectives at 1 and one at 100 reject the 100.
 
 ## Predict and plot
 

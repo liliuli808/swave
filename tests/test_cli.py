@@ -89,6 +89,8 @@ def test_invert_help_exposes_all_validated_overrides(capsys) -> None:
         "--output-dir",
         "--device",
         "--workers",
+        "--deep-samples-per-job",
+        "--threads-per-worker",
         "--task-index",
         "--task-count",
     ):
@@ -105,17 +107,21 @@ def test_invert_applies_overrides_and_prints_strict_json(
 
     captured: list[tuple[InversionConfig, str]] = []
     manifest = ResultManifest(
-        schema_version=2,
+        schema_version=3,
         dataset_config_hash="a" * 64,
+        dataset_manifest_sha256="d" * 64,
         checkpoint_sha256="b" * 64,
         split_policy=SPLIT_POLICY,
         inversion_config_hash="c" * 64,
         minimum_valid_solutions=None,
         experiment="full",
         expected_jobs=("full-clean-shard-00000",),
+        expected_job_sample_count={"full-clean-shard-00000": 1},
+        expected_job_sample_id_sha256={"full-clean-shard-00000": "e" * 64},
         completed_jobs=(),
         job_sha256={},
         package_version="0.1.0",
+        software_sha256="f" * 64,
         created_at="2026-08-02T00:00:00+00:00",
         complete=False,
     )
@@ -150,6 +156,10 @@ def test_invert_applies_overrides_and_prints_strict_json(
             "cpu",
             "--workers",
             "3",
+            "--deep-samples-per-job",
+            "7",
+            "--threads-per-worker",
+            "2",
             "--task-index",
             "2",
             "--task-count",
@@ -168,6 +178,8 @@ def test_invert_applies_overrides_and_prints_strict_json(
         output_dir=tmp_path / "results",
         device="cpu",
         workers=3,
+        deep_samples_per_job=7,
+        threads_per_worker=2,
         task_index=2,
         task_count=4,
     )

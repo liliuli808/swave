@@ -17,6 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .config import DatasetConfig, canonical_hash
+from .dataset import dataset_manifest_sha256, validate_dataset_files
 from .geology import ModelKind
 from .inversion_results import (
     ResultBatch,
@@ -29,7 +30,9 @@ matplotlib.use("Agg", force=True)
 from matplotlib import pyplot as plt
 
 _JOB_PATTERN = re.compile(
-    r"(?P<experiment>full|deep)-(?P<noise>clean|noise_1pct)-shard-[0-9]+"
+    r"(?:(?P<full>full)-(?P<full_noise>clean|noise_1pct)-shard-[0-9]+|"
+    r"(?P<deep>deep)-(?P<deep_noise>clean|noise_1pct)-samples-"
+    r"[0-9]{20}-[0-9]{20}-[0-9a-f]{12})"
 )
 _KIND_NAMES = {int(kind): kind.name.lower() for kind in ModelKind}
 _SCOPE_LABELS = {
@@ -56,9 +59,21 @@ class _MetricRows:
     valid_mask: NDArray[np.bool_]
     failure_code: NDArray[np.bytes_]
     reference_vs: NDArray[np.float32]
+    ensemble_success: NDArray[np.bool_] | None
+    ensemble_status: NDArray[np.int32] | None
+    ensemble_iterations: NDArray[np.int32] | None
+    ensemble_evaluations: NDArray[np.int32] | None
+    ensemble_initial_objective: NDArray[np.float64] | None
+    ensemble_objective: NDArray[np.float64] | None
+    ensemble_failure_code: NDArray[np.bytes_] | None
+    ensemble_message: NDArray[np.bytes_] | None
+    ensemble_inlier_mask: NDArray[np.bool_] | None
     median_vs: NDArray[np.float32] | None
     p10_vs: NDArray[np.float32] | None
     p90_vs: NDArray[np.float32] | None
+    physical_success: NDArray[np.bool_] | None
+    physical_status: NDArray[np.int32] | None
+    physical_failure_code: NDArray[np.bytes_] | None
     physical_phase_velocity: NDArray[np.float32] | None
     physical_valid_mask: NDArray[np.bool_] | None
     truth_vs: NDArray[np.float64]
@@ -88,9 +103,21 @@ def _rows_from_batch(
         valid_mask=batch.valid_mask,
         failure_code=batch.failure_code,
         reference_vs=batch.reference_vs,
+        ensemble_success=batch.ensemble_success,
+        ensemble_status=batch.ensemble_status,
+        ensemble_iterations=batch.ensemble_iterations,
+        ensemble_evaluations=batch.ensemble_evaluations,
+        ensemble_initial_objective=batch.ensemble_initial_objective,
+        ensemble_objective=batch.ensemble_objective,
+        ensemble_failure_code=batch.ensemble_failure_code,
+        ensemble_message=batch.ensemble_message,
+        ensemble_inlier_mask=batch.ensemble_inlier_mask,
         median_vs=batch.median_vs,
         p10_vs=batch.p10_vs,
         p90_vs=batch.p90_vs,
+        physical_success=batch.physical_success,
+        physical_status=batch.physical_status,
+        physical_failure_code=batch.physical_failure_code,
         physical_phase_velocity=batch.physical_phase_velocity,
         physical_valid_mask=batch.physical_valid_mask,
         truth_vs=true_values,
@@ -330,6 +357,71 @@ def _decode_code(value: np.bytes_) -> str:
         raise ValueError("failure_code contains non-ASCII bytes") from error
 
 
+def _decode_message(value: np.bytes_) -> str:
+    try:
+        return bytes(value).decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("ensemble_message contains non-UTF-8 bytes") from error
+
+
+def _start_diagnostics(rows: _MetricRows) -> dict[str, Any] | None:
+    if rows.ensemble_success is None:
+        return None
+    assert rows.ensemble_status is not None
+    assert rows.ensemble_iterations is not None
+    assert rows.ensemble_evaluations is not None
+    assert rows.ensemble_initial_objective is not None
+    assert rows.ensemble_objective is not None
+    assert rows.ensemble_failure_code is not None
+    assert rows.ensemble_message is not None
+    assert rows.ensemble_inlier_mask is not None
+    success = rows.ensemble_success
+    inlier = rows.ensemble_inlier_mask
+    total = int(success.size)
+    successful = int(np.count_nonzero(success))
+    rejected = success & ~inlier
+    failed_codes = [
+        _decode_code(value) for value in rows.ensemble_failure_code[~success]
+    ]
+    failed_messages = [
+        _decode_message(value) for value in rows.ensemble_message[~success]
+    ]
+    return {
+        "start_count": total,
+        "convergence": {
+            "successful_count": successful,
+            "success_fraction": float(successful / total),
+        },
+        "failure_code_counts": dict(sorted(Counter(failed_codes).items())),
+        "failure_message_counts": dict(sorted(Counter(failed_messages).items())),
+        "status_counts": {
+            str(int(status)): int(count)
+            for status, count in sorted(
+                Counter(int(value) for value in rows.ensemble_status.ravel()).items()
+            )
+        },
+        "iqr_rejection": {
+            "inlier_count": int(np.count_nonzero(inlier)),
+            "rejected_successful_count": int(np.count_nonzero(rejected)),
+            "rejected_fraction_of_successful": (
+                float(np.count_nonzero(rejected) / successful) if successful else None
+            ),
+            "rejected_starts_per_sample": _distribution(
+                np.count_nonzero(rejected, axis=1)
+            ),
+            "policy": "inclusive 1.5-IQR fences, including zero-IQR samples",
+        },
+        "effort": {
+            "iterations": _distribution(rows.ensemble_iterations),
+            "evaluations": _distribution(rows.ensemble_evaluations),
+        },
+        "objective": {
+            "initial": _distribution(rows.ensemble_initial_objective),
+            "final": _distribution(rows.ensemble_objective),
+        },
+    }
+
+
 def _empty_accuracy(total_rows: int) -> dict[str, Any]:
     return {
         "row_count": 0,
@@ -371,10 +463,9 @@ def _compute_rows_metrics(rows: _MetricRows) -> dict[str, Any]:
     successful = rows.success
     success_count = int(np.count_nonzero(successful))
     codes = [_decode_code(code) for code in rows.failure_code[~successful]]
-    result: dict[str, Any] = {
-        "sample_count": count,
-        "successful_count": success_count,
-        "convergence": {
+    sample_outcomes: dict[str, Any] = {
+        "inversion": {
+            "successful_count": success_count,
             "success_fraction": float(success_count / count),
             "failure_code_counts": dict(sorted(Counter(codes).items())),
             "status_counts": {
@@ -383,7 +474,44 @@ def _compute_rows_metrics(rows: _MetricRows) -> dict[str, Any]:
                     Counter(int(value) for value in rows.status).items()
                 )
             },
-        },
+        }
+    }
+    if rows.physical_success is not None:
+        assert rows.physical_status is not None
+        assert rows.physical_failure_code is not None
+        attempted = successful
+        physical_success_count = int(
+            np.count_nonzero(rows.physical_success & attempted)
+        )
+        physical_failure_codes = [
+            _decode_code(code)
+            for code in rows.physical_failure_code[attempted & ~rows.physical_success]
+        ]
+        sample_outcomes["physical"] = {
+            "attempted_count": int(np.count_nonzero(attempted)),
+            "successful_count": physical_success_count,
+            "success_fraction_of_attempted": (
+                float(physical_success_count / np.count_nonzero(attempted))
+                if np.any(attempted)
+                else None
+            ),
+            "failure_code_counts": dict(
+                sorted(Counter(physical_failure_codes).items())
+            ),
+            "status_counts": {
+                str(int(status)): int(total)
+                for status, total in sorted(
+                    Counter(
+                        int(value) for value in rows.physical_status[attempted]
+                    ).items()
+                )
+            },
+            "not_attempted_count": int(np.count_nonzero(~attempted)),
+        }
+    result: dict[str, Any] = {
+        "sample_count": count,
+        "successful_count": success_count,
+        "sample_outcomes": sample_outcomes,
         "optimization": {
             "iterations": _distribution(rows.iterations),
             "evaluations": _distribution(rows.evaluations),
@@ -391,6 +519,9 @@ def _compute_rows_metrics(rows: _MetricRows) -> dict[str, Any]:
             "final_objective": _distribution(rows.final_objective),
         },
     }
+    start_metrics = _start_diagnostics(rows)
+    if start_metrics is not None:
+        result["start_diagnostics"] = start_metrics
     if success_count == 0:
         result["vs"] = _empty_accuracy(count)
         result["surrogate_frequency"] = _empty_frequency(
@@ -507,16 +638,14 @@ def _load_true_vs(
     return np.stack([found[int(value)] for value in requested], axis=0)
 
 
-def _dataset_identity(dataset_dir: Path, expected_hash: str) -> None:
-    manifest_path = dataset_dir / "manifest.json"
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError("dataset manifest is not readable JSON") from error
-    if not isinstance(payload, dict) or payload.get("complete") is not True:
-        raise ValueError("dataset manifest is incomplete")
-    if payload.get("config_hash") != expected_hash:
+def _validate_dataset_identity(
+    dataset_dir: Path, result_manifest: ResultManifest
+) -> None:
+    manifest = validate_dataset_files(dataset_dir)
+    if manifest.config_hash != result_manifest.dataset_config_hash:
         raise ValueError("dataset identity does not match inversion results")
+    if dataset_manifest_sha256(manifest) != result_manifest.dataset_manifest_sha256:
+        raise ValueError("dataset manifest digest does not match inversion results")
 
 
 def _load_result_groups(
@@ -528,8 +657,9 @@ def _load_result_groups(
         match = _JOB_PATTERN.fullmatch(job)
         if match is None:
             raise ValueError(f"result job {job!r} does not have a reportable identity")
-        experiment = match.group("experiment")
-        noise = match.group("noise")
+        experiment = match.group("full") or match.group("deep")
+        noise = match.group("full_noise") or match.group("deep_noise")
+        assert experiment is not None and noise is not None
         batch = validate_result_shard(
             results_dir / f"{job}.h5",
             manifest=manifest,
@@ -768,6 +898,64 @@ def _null_vs_delta() -> dict[str, Any]:
     }
 
 
+def _paired_start_delta(clean: _MetricRows, noisy: _MetricRows) -> dict[str, Any]:
+    assert clean.ensemble_success is not None
+    assert noisy.ensemble_success is not None
+    assert clean.ensemble_iterations is not None
+    assert noisy.ensemble_iterations is not None
+    assert clean.ensemble_evaluations is not None
+    assert noisy.ensemble_evaluations is not None
+    assert clean.ensemble_initial_objective is not None
+    assert noisy.ensemble_initial_objective is not None
+    assert clean.ensemble_objective is not None
+    assert noisy.ensemble_objective is not None
+    if clean.ensemble_success.shape != noisy.ensemble_success.shape:
+        raise ValueError("clean and noisy start diagnostics are not aligned")
+
+    def paired_finite_mean_delta(
+        clean_values: NDArray[Any], noisy_values: NDArray[Any]
+    ) -> tuple[int, float | None]:
+        usable = np.isfinite(clean_values) & np.isfinite(noisy_values)
+        count = int(np.count_nonzero(usable))
+        return (
+            count,
+            float(np.mean(noisy_values[usable] - clean_values[usable]))
+            if count
+            else None,
+        )
+
+    initial_count, initial_delta = paired_finite_mean_delta(
+        clean.ensemble_initial_objective, noisy.ensemble_initial_objective
+    )
+    final_count, final_delta = paired_finite_mean_delta(
+        clean.ensemble_objective, noisy.ensemble_objective
+    )
+    return {
+        "paired_start_count": int(clean.ensemble_success.size),
+        "paired_successful_start_count": int(
+            np.count_nonzero(clean.ensemble_success & noisy.ensemble_success)
+        ),
+        "convergence_fraction": float(
+            np.mean(noisy.ensemble_success) - np.mean(clean.ensemble_success)
+        ),
+        "iterations_mean": float(
+            np.mean(noisy.ensemble_iterations - clean.ensemble_iterations)
+        ),
+        "evaluations_mean": float(
+            np.mean(noisy.ensemble_evaluations - clean.ensemble_evaluations)
+        ),
+        "initial_objective": {
+            "paired_finite_count": initial_count,
+            "mean": initial_delta,
+        },
+        "final_objective": {
+            "paired_finite_count": final_count,
+            "mean": final_delta,
+        },
+        "policy": "noisy minus clean on aligned sample/start identities",
+    }
+
+
 def _group_delta(clean: _MetricRows, noisy: _MetricRows) -> dict[str, Any]:
     if not np.array_equal(clean.sample_id, noisy.sample_id):
         raise ValueError("clean and noisy rows are not paired by sample ID")
@@ -782,6 +970,13 @@ def _group_delta(clean: _MetricRows, noisy: _MetricRows) -> dict[str, Any]:
             "deltas additionally use cells valid in both scenarios"
         ),
     }
+    if clean.ensemble_success is not None:
+        result["start_diagnostics"] = _paired_start_delta(clean, noisy)
+    if clean.physical_success is not None:
+        assert noisy.physical_success is not None
+        result["physical_success_fraction"] = float(
+            np.mean(noisy.physical_success) - np.mean(clean.physical_success)
+        )
     if paired_count == 0:
         result.update(
             usable_counts={
@@ -1011,23 +1206,48 @@ def _plot_optimization(rows: _MetricRows, output_dir: Path, scope_label: str) ->
     if rows.sample_id.size == 0:
         raise ValueError(f"cannot plot empty optimization group: {scope_label}")
     figure, axes = plt.subplots(1, 3, figsize=(13, 4))
-    finite_initial = rows.initial_objective[np.isfinite(rows.initial_objective)]
-    finite_final = rows.final_objective[np.isfinite(rows.final_objective)]
+    is_deep = rows.ensemble_success is not None
+    if is_deep:
+        assert rows.ensemble_initial_objective is not None
+        assert rows.ensemble_objective is not None
+        assert rows.ensemble_iterations is not None
+        finite_initial = rows.ensemble_initial_objective[
+            np.isfinite(rows.ensemble_initial_objective)
+        ]
+        finite_final = rows.ensemble_objective[np.isfinite(rows.ensemble_objective)]
+    else:
+        finite_initial = rows.initial_objective[np.isfinite(rows.initial_objective)]
+        finite_final = rows.final_objective[np.isfinite(rows.final_objective)]
     if finite_initial.size == 0 or finite_final.size == 0:
         raise ValueError(f"cannot plot empty objective group: {scope_label}")
     axes[0].boxplot([finite_initial, finite_final], tick_labels=["initial", "final"])
     axes[0].set_ylabel("Objective")
     noises = sorted(set(rows.noise.tolist()))
-    success_rates = [
-        float(np.mean(rows.success[rows.noise == noise])) for noise in noises
-    ]
+    success_rates = []
+    for noise in noises:
+        selected = _select_rows(rows, rows.noise == noise)
+        if selected.ensemble_success is None:
+            success_rates.append(float(np.mean(selected.success)))
+        else:
+            success_rates.append(float(np.mean(selected.ensemble_success)))
     axes[1].bar(noises, success_rates)
     axes[1].set_ylim(0.0, 1.0)
-    axes[1].set_ylabel("Convergence fraction")
-    successful = _require_plot_rows(rows, scope_label)
-    axes[2].hist(rows.iterations[successful], bins="auto")
+    axes[1].set_ylabel(
+        "Start convergence fraction" if is_deep else "Inversion success fraction"
+    )
+    if is_deep:
+        assert rows.ensemble_success is not None
+        assert rows.ensemble_iterations is not None
+        iterations = rows.ensemble_iterations[rows.ensemble_success]
+        if iterations.size == 0:
+            raise ValueError(f"cannot plot empty successful starts: {scope_label}")
+        axes[2].hist(iterations, bins="auto")
+        axes[2].set_ylabel("Successful starts")
+    else:
+        successful = _require_plot_rows(rows, scope_label)
+        axes[2].hist(rows.iterations[successful], bins="auto")
+        axes[2].set_ylabel("Successful inversions")
     axes[2].set_xlabel("Iterations")
-    axes[2].set_ylabel("Successful rows")
     figure.suptitle(f"Optimization diagnostics — {scope_label}")
     figure.tight_layout()
     name = "optimization-diagnostics.png"
@@ -1134,9 +1354,9 @@ def build_inversion_report(
     # This must remain the first external-data action: truth is unavailable until the
     # entire immutable result identity and every result shard have passed validation.
     manifest = validate_complete_results(results_path)
+    _validate_dataset_identity(dataset_path, manifest)
     grouped_batches = _load_result_groups(results_path, manifest)
     requested_ids = _validate_result_alignment(grouped_batches)
-    _dataset_identity(dataset_path, manifest.dataset_config_hash)
     if not isinstance(dataset_config, DatasetConfig):
         raise TypeError("dataset_config must be a DatasetConfig")
     if canonical_hash(dataset_config) != manifest.dataset_config_hash:
@@ -1166,7 +1386,8 @@ def build_inversion_report(
             "optimization_diagnostic_semantics": (
                 "one optimizer run per result row"
                 if experiment == "full"
-                else "stored iterations and evaluations are totals across ensemble starts"
+                else "start diagnostics are reported per optimizer start; row totals "
+                "are retained only as sample-level effort summaries"
             ),
             "result_row_count": int(rows.sample_id.size),
             "unique_sample_count": int(np.unique(rows.sample_id).size),
@@ -1222,7 +1443,7 @@ def build_inversion_report(
                 }
 
     summary: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "units": {
             "velocity": "km/s",
             "depth": "km",
@@ -1230,10 +1451,12 @@ def build_inversion_report(
         },
         "result_identity": {
             "dataset_config_hash": manifest.dataset_config_hash,
+            "dataset_manifest_sha256": manifest.dataset_manifest_sha256,
             "checkpoint_sha256": manifest.checkpoint_sha256,
             "inversion_config_hash": manifest.inversion_config_hash,
             "split_policy": manifest.split_policy,
             "experiment": manifest.experiment,
+            "software_sha256": manifest.software_sha256,
         },
         "scope_policy": (
             "full and deep rows are reported independently; figures never pool "

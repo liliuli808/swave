@@ -10,19 +10,39 @@ import h5py
 import numpy as np
 import pytest
 
+import swave.inversion_results as results_module
 from swave.config import InversionConfig, inversion_identity_hash
 from swave.inversion_results import (
     ResultBatch,
-    initialize_result_manifest,
     mark_job_complete,
     validate_complete_results,
     validate_result_shard,
     write_result_shard,
 )
+from swave.inversion_results import (
+    initialize_result_manifest as _initialize_result_manifest,
+)
 from swave.splits import SPLIT_POLICY
 
 JOB_A = "full-clean-shard-00000"
 JOB_B = "full-clean-shard-00001"
+
+
+def initialize_result_manifest(*args, **kwargs):
+    """Supply canonical fixture dataset/population identities to schema v3."""
+    kwargs.setdefault("dataset_manifest_sha256", "d" * 64)
+    jobs = tuple(kwargs["expected_jobs"])
+    if "expected_sample_ids_by_job" not in kwargs:
+        experiments = {job.split("-", 1)[0] for job in jobs}
+        if len(jobs) == 1 or len(experiments) > 1:
+            populations = {job: np.array([90, 91], dtype=np.uint64) for job in jobs}
+        else:
+            populations = {
+                job: np.array([90 + index], dtype=np.uint64)
+                for index, job in enumerate(jobs)
+            }
+        kwargs["expected_sample_ids_by_job"] = populations
+    return _initialize_result_manifest(*args, **kwargs)
 
 
 def _batch(sample_ids: tuple[int, ...] = (90, 91)) -> ResultBatch:
@@ -57,11 +77,19 @@ def _deep_batch() -> ResultBatch:
         ensemble_vs=np.full((count, starts, 20), 1.1, dtype=np.float32),
         ensemble_success=np.ones((count, starts), dtype=np.bool_),
         ensemble_status=np.zeros((count, starts), dtype=np.int32),
+        ensemble_iterations=np.full((count, starts), 4, dtype=np.int32),
+        ensemble_evaluations=np.full((count, starts), 5, dtype=np.int32),
+        ensemble_initial_objective=np.full((count, starts), 2.0, dtype=np.float64),
         ensemble_objective=np.ones((count, starts), dtype=np.float64),
+        ensemble_failure_code=np.full((count, starts), b"", dtype="S64"),
+        ensemble_message=np.full((count, starts), b"converged", dtype="S256"),
         ensemble_inlier_mask=np.ones((count, starts), dtype=np.bool_),
         median_vs=np.full((count, 20), 1.1, dtype=np.float32),
         p10_vs=np.full((count, 20), 1.0, dtype=np.float32),
         p90_vs=np.full((count, 20), 1.2, dtype=np.float32),
+        physical_success=np.ones(count, dtype=np.bool_),
+        physical_status=np.zeros(count, dtype=np.int32),
+        physical_failure_code=np.full(count, b"", dtype="S64"),
         physical_phase_velocity=np.full((count, 4, 120), 1.15, dtype=np.float32),
         physical_valid_mask=np.ones((count, 4, 120), dtype=np.bool_),
     )
@@ -110,6 +138,113 @@ def test_result_identity_binds_checkpoint_and_configuration(
     assert manifest.inversion_config_hash == "b" * 64
     assert manifest.split_policy == SPLIT_POLICY
     assert not manifest.complete
+
+
+def test_software_digest_is_deterministic_and_binds_source_bytes(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "swave"
+    package.mkdir()
+    (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (package / "nested.py").write_text("def value(): return 1\n", encoding="utf-8")
+
+    first = results_module.software_sha256(package, package_version="0.1.0")
+    second = results_module.software_sha256(package, package_version="0.1.0")
+    assert first == second
+
+    (package / "nested.py").write_text("def value(): return 2\n", encoding="utf-8")
+    changed_source = results_module.software_sha256(package, package_version="0.1.0")
+    changed_version = results_module.software_sha256(package, package_version="0.1.1")
+    assert changed_source != first
+    assert changed_version != changed_source
+
+
+def test_manifest_binds_dataset_software_and_expected_job_population(
+    tmp_path: Path, checkpoint: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected_ids = {JOB_A: np.array([90, 91], dtype=np.uint64)}
+    manifest = initialize_result_manifest(
+        tmp_path,
+        dataset_config_hash="a" * 64,
+        dataset_manifest_sha256="d" * 64,
+        checkpoint=checkpoint,
+        inversion_config_hash="b" * 64,
+        experiment="full",
+        expected_jobs=(JOB_A,),
+        expected_sample_ids_by_job=expected_ids,
+    )
+
+    assert manifest.dataset_manifest_sha256 == "d" * 64
+    assert manifest.software_sha256 == results_module.software_sha256()
+    assert manifest.expected_job_sample_count == {JOB_A: 2}
+    assert manifest.expected_job_sample_id_sha256 == {
+        JOB_A: results_module.sample_id_sha256(expected_ids[JOB_A])
+    }
+
+    with pytest.raises(ValueError, match="identity"):
+        initialize_result_manifest(
+            tmp_path,
+            dataset_config_hash="a" * 64,
+            dataset_manifest_sha256="e" * 64,
+            checkpoint=checkpoint,
+            inversion_config_hash="b" * 64,
+            experiment="full",
+            expected_jobs=(JOB_A,),
+            expected_sample_ids_by_job=expected_ids,
+        )
+
+    monkeypatch.setattr(results_module, "software_sha256", lambda: "f" * 64)
+    with pytest.raises(ValueError, match="identity"):
+        initialize_result_manifest(
+            tmp_path,
+            dataset_config_hash="a" * 64,
+            dataset_manifest_sha256="d" * 64,
+            checkpoint=checkpoint,
+            inversion_config_hash="b" * 64,
+            experiment="full",
+            expected_jobs=(JOB_A,),
+            expected_sample_ids_by_job=expected_ids,
+        )
+
+
+def test_job_population_identity_rejects_an_identical_scenario_omission(
+    tmp_path: Path, checkpoint: Path
+) -> None:
+    manifest = initialize_result_manifest(
+        tmp_path,
+        dataset_config_hash="a" * 64,
+        dataset_manifest_sha256="d" * 64,
+        checkpoint=checkpoint,
+        inversion_config_hash="b" * 64,
+        experiment="full",
+        expected_jobs=(JOB_A,),
+        expected_sample_ids_by_job={JOB_A: np.array([90, 91], dtype=np.uint64)},
+    )
+
+    with pytest.raises(ValueError, match="sample.*count|sample.*identity"):
+        write_result_shard(tmp_path, JOB_A, _batch((90,)), manifest)
+
+
+def test_schema_v2_manifest_is_rejected_with_a_migration_message(
+    tmp_path: Path, checkpoint: Path
+) -> None:
+    directory = tmp_path / "results"
+    directory.mkdir()
+    (directory / "manifest.json").write_text(
+        json.dumps({"schema_version": 2}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="schema version 2.*new.*directory"):
+        initialize_result_manifest(
+            directory,
+            dataset_config_hash="a" * 64,
+            dataset_manifest_sha256="d" * 64,
+            checkpoint=checkpoint,
+            inversion_config_hash="b" * 64,
+            experiment="full",
+            expected_jobs=(JOB_A,),
+            expected_sample_ids_by_job={JOB_A: np.array([90, 91], dtype=np.uint64)},
+        )
 
 
 def test_manifest_can_derive_scientific_identity_without_operational_controls(
@@ -268,12 +403,49 @@ def test_result_batch_requires_all_deep_fields_with_consistent_start_count() -> 
         replace(_deep_batch(), ensemble_status=np.zeros((2, 2), dtype=np.int32))
 
 
+def test_deep_schema_binds_per_start_effort_messages_and_physical_outcome() -> None:
+    base = _deep_batch()
+    count, starts = 2, 3
+    physical = np.full((count, 4, 120), np.nan, dtype=np.float32)
+    physical_mask = np.zeros((count, 4, 120), dtype=np.bool_)
+    batch = replace(
+        base,
+        physical_phase_velocity=physical,
+        physical_valid_mask=physical_mask,
+        physical_success=np.zeros(count, dtype=np.bool_),
+        physical_status=np.full(count, -1, dtype=np.int32),
+        physical_failure_code=np.full(count, b"physical_solver_failure", dtype="S64"),
+        ensemble_iterations=np.full((count, starts), 4, dtype=np.int32),
+        ensemble_evaluations=np.full((count, starts), 5, dtype=np.int32),
+        ensemble_initial_objective=np.full((count, starts), 2.0, dtype=np.float64),
+        ensemble_failure_code=np.full((count, starts), b"", dtype="S64"),
+        ensemble_message=np.full((count, starts), b"converged", dtype="S256"),
+    )
+
+    assert np.all(batch.success)
+    assert batch.physical_success is not None
+    assert not np.any(batch.physical_success)
+
+    assert batch.ensemble_iterations is not None
+    corrupted = batch.ensemble_iterations.copy()
+    corrupted[0, 0] = -1
+    with pytest.raises(ValueError, match="ensemble_iterations"):
+        replace(batch, ensemble_iterations=corrupted)
+
+    assert batch.ensemble_failure_code is not None
+    codes = batch.ensemble_failure_code.copy()
+    codes[0, 0] = b"optimizer_failure"
+    with pytest.raises(ValueError, match="ensemble_failure_code"):
+        replace(batch, ensemble_failure_code=codes)
+
+
 def test_successful_deep_row_requires_a_successful_inlier_start() -> None:
     base = _deep_batch()
     with pytest.raises(ValueError, match="successful deep.*inlier"):
         replace(
             base,
             ensemble_success=np.zeros((2, 3), dtype=np.bool_),
+            ensemble_failure_code=np.full((2, 3), b"optimizer_failure", dtype="S64"),
             ensemble_inlier_mask=np.zeros((2, 3), dtype=np.bool_),
         )
 
@@ -407,6 +579,13 @@ def test_deep_success_must_meet_bound_minimum_valid_solutions(
         ensemble_inlier_mask=np.array(
             [[True, False, False], [True, False, False]], dtype=np.bool_
         ),
+        ensemble_failure_code=np.array(
+            [
+                [b"", b"optimizer_failure", b"optimizer_failure"],
+                [b"", b"optimizer_failure", b"optimizer_failure"],
+            ],
+            dtype="S64",
+        ),
     )
 
     assert manifest.minimum_valid_solutions == 2
@@ -468,6 +647,11 @@ def test_insufficient_valid_solutions_code_requires_too_few_inliers(
         base,
         success=np.zeros(2, dtype=np.bool_),
         failure_code=np.full(2, b"insufficient_valid_solutions", dtype="S64"),
+        physical_success=np.zeros(2, dtype=np.bool_),
+        physical_status=np.full(2, -2, dtype=np.int32),
+        physical_failure_code=np.full(2, b"not_attempted", dtype="S64"),
+        physical_phase_velocity=np.full((2, 4, 120), np.nan, dtype=np.float32),
+        physical_valid_mask=np.zeros((2, 4, 120), dtype=np.bool_),
     )
 
     with pytest.raises(ValueError, match="insufficient_valid_solutions.*inlier"):
@@ -496,6 +680,18 @@ def test_insufficient_valid_solutions_cannot_publish_arbitrary_summary(
         ensemble_inlier_mask=np.array(
             [[True, False, False], [True, False, False]], dtype=np.bool_
         ),
+        ensemble_failure_code=np.array(
+            [
+                [b"", b"optimizer_failure", b"optimizer_failure"],
+                [b"", b"optimizer_failure", b"optimizer_failure"],
+            ],
+            dtype="S64",
+        ),
+        physical_success=np.zeros(2, dtype=np.bool_),
+        physical_status=np.full(2, -2, dtype=np.int32),
+        physical_failure_code=np.full(2, b"not_attempted", dtype="S64"),
+        physical_phase_velocity=np.full((2, 4, 120), np.nan, dtype=np.float32),
+        physical_valid_mask=np.zeros((2, 4, 120), dtype=np.bool_),
     )
 
     with pytest.raises(ValueError, match="insufficient_valid_solutions.*summary"):
@@ -820,7 +1016,7 @@ def test_complete_validation_rejects_duplicate_ids_within_one_shard(
         validate_complete_results(tmp_path)
 
 
-def test_complete_validation_rejects_duplicate_ids_across_same_scenario(
+def test_population_identity_rejects_duplicate_ids_across_same_scenario(
     tmp_path: Path, checkpoint: Path
 ) -> None:
     manifest = initialize_result_manifest(
@@ -832,9 +1028,5 @@ def test_complete_validation_rejects_duplicate_ids_across_same_scenario(
         expected_jobs=(JOB_A, JOB_B),
     )
     write_result_shard(tmp_path, JOB_A, _batch((90,)), manifest)
-    write_result_shard(tmp_path, JOB_B, _batch((90,)), manifest)
-    mark_job_complete(tmp_path, JOB_A)
-    mark_job_complete(tmp_path, JOB_B)
-
-    with pytest.raises(ValueError, match="duplicate sample_id"):
-        validate_complete_results(tmp_path)
+    with pytest.raises(ValueError, match="sample identity"):
+        write_result_shard(tmp_path, JOB_B, _batch((90,)), manifest)

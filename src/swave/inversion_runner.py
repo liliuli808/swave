@@ -5,7 +5,8 @@ from __future__ import annotations
 import multiprocessing
 import os
 from collections.abc import Mapping
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -20,7 +21,7 @@ from .config import (
     canonical_hash,
     load_dataset_config,
 )
-from .dataset import validate_dataset_files
+from .dataset import dataset_manifest_sha256, validate_dataset_files
 from .inversion import (
     DifferentiableSurrogate,
     SurrogateObjective,
@@ -42,6 +43,7 @@ from .inversion_results import (
     ResultManifest,
     initialize_result_manifest,
     mark_job_complete,
+    sample_id_sha256,
     validate_complete_results,
     validate_result_shard,
     write_result_shard,
@@ -56,7 +58,7 @@ JobExperiment = Literal["full", "deep"]
 
 @dataclass(frozen=True)
 class InversionJob:
-    """One stable experiment/noise/source-shard unit of work."""
+    """One stable, bounded experiment/noise unit of work."""
 
     name: str
     experiment: JobExperiment
@@ -64,16 +66,24 @@ class InversionJob:
     samples: tuple[InversionSample, ...]
 
 
-def _group_selected_samples(
-    samples: list[InversionSample],
-) -> dict[int, tuple[InversionSample, ...]]:
-    grouped: dict[int, list[InversionSample]] = {}
-    for sample in samples:
-        grouped.setdefault(sample.source_shard_id, []).append(sample)
-    return {
-        shard_id: tuple(sorted(rows, key=lambda sample: sample.sample_id))
-        for shard_id, rows in sorted(grouped.items())
-    }
+def _deep_sample_chunks(
+    samples: list[InversionSample], chunk_size: int
+) -> tuple[tuple[InversionSample, ...], ...]:
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int):
+        raise TypeError("deep_samples_per_job must be an integer")
+    if chunk_size <= 0:
+        raise ValueError("deep_samples_per_job must be positive")
+    ordered = tuple(sorted(samples, key=lambda sample: sample.sample_id))
+    return tuple(
+        ordered[offset : offset + chunk_size]
+        for offset in range(0, len(ordered), chunk_size)
+    )
+
+
+def _deep_job_name(noise: NoiseScenario, samples: tuple[InversionSample, ...]) -> str:
+    ids = np.asarray([sample.sample_id for sample in samples], dtype=np.uint64)
+    digest = sample_id_sha256(ids)[:12]
+    return f"deep-{noise}-samples-{int(ids[0]):020d}-{int(ids[-1]):020d}-{digest}"
 
 
 def build_jobs(
@@ -82,6 +92,7 @@ def build_jobs(
     noise_scenarios: tuple[NoiseScenario, ...],
     *,
     samples_per_kind: int,
+    deep_samples_per_job: int = 10,
 ) -> tuple[InversionJob, ...]:
     """Build deterministic jobs without reading inversion target profiles."""
     if experiment not in {"full", "deep", "both"}:
@@ -101,17 +112,28 @@ def build_jobs(
                 shard_id: tuple(samples)
                 for shard_id, samples in samples_by_source_shard(dataset_dir).items()
             }
+            for noise in noise_scenarios:
+                for shard_id, samples in grouped.items():
+                    if samples:
+                        jobs.append(
+                            InversionJob(
+                                name=(f"full-{noise}-shard-{shard_id:05d}"),
+                                experiment="full",
+                                noise=noise,
+                                samples=samples,
+                            )
+                        )
         else:
-            grouped = _group_selected_samples(
-                select_deep_samples(dataset_dir, samples_per_kind)
+            chunks = _deep_sample_chunks(
+                select_deep_samples(dataset_dir, samples_per_kind),
+                deep_samples_per_job,
             )
-        for noise in noise_scenarios:
-            for shard_id, samples in grouped.items():
-                if samples:
+            for noise in noise_scenarios:
+                for samples in chunks:
                     jobs.append(
                         InversionJob(
-                            name=(f"{current}-{noise}-shard-{shard_id:05d}"),
-                            experiment=current,
+                            name=_deep_job_name(noise, samples),
+                            experiment="deep",
                             noise=noise,
                             samples=samples,
                         )
@@ -145,6 +167,24 @@ def _failure_code(error: Exception) -> bytes:
     ):
         return b"nonfinite_objective"
     return b"optimizer_failure"
+
+
+def _start_failure_code(run) -> bytes:
+    if run.success:
+        return b""
+    text = run.message.lower()
+    if "non-finite" in text and ("objective" in text or "gradient" in text):
+        return b"nonfinite_objective"
+    return b"optimizer_failure"
+
+
+def _encoded_message(message: str) -> bytes:
+    printable = "".join(
+        character if character.isprintable() else " " for character in str(message)
+    )
+    text = " ".join(printable.split()) or "no optimizer message"
+    encoded = text.encode("utf-8", errors="replace")
+    return encoded[:512].decode("utf-8", errors="ignore").encode("utf-8")
 
 
 def run_inversion_job(
@@ -184,11 +224,19 @@ def run_inversion_job(
     ensemble_vs = None
     ensemble_success = None
     ensemble_status = None
+    ensemble_iterations = None
+    ensemble_evaluations = None
+    ensemble_initial_objective = None
     ensemble_objective = None
+    ensemble_failure_code = None
+    ensemble_message = None
     ensemble_inlier_mask = None
     median_vs = None
     p10_vs = None
     p90_vs = None
+    physical_success = None
+    physical_status = None
+    physical_failure_code = None
     physical_phase_velocity = None
     physical_valid_mask = None
     if job.experiment == "deep":
@@ -196,11 +244,21 @@ def run_inversion_job(
         ensemble_vs = np.full((*ensemble_shape, 20), np.nan, dtype=np.float32)
         ensemble_success = np.zeros(ensemble_shape, dtype=np.bool_)
         ensemble_status = np.full(ensemble_shape, -1, dtype=np.int32)
+        ensemble_iterations = np.zeros(ensemble_shape, dtype=np.int32)
+        ensemble_evaluations = np.zeros(ensemble_shape, dtype=np.int32)
+        ensemble_initial_objective = np.full(ensemble_shape, np.nan, dtype=np.float64)
         ensemble_objective = np.full(ensemble_shape, np.nan, dtype=np.float64)
+        ensemble_failure_code = np.full(
+            ensemble_shape, b"optimizer_failure", dtype="S64"
+        )
+        ensemble_message = np.full(ensemble_shape, b"not attempted", dtype="S512")
         ensemble_inlier_mask = np.zeros(ensemble_shape, dtype=np.bool_)
         median_vs = np.full((count, 20), np.nan, dtype=np.float32)
         p10_vs = np.full((count, 20), np.nan, dtype=np.float32)
         p90_vs = np.full((count, 20), np.nan, dtype=np.float32)
+        physical_success = np.zeros(count, dtype=np.bool_)
+        physical_status = np.full(count, -2, dtype=np.int32)
+        physical_failure_code = np.full(count, b"not_attempted", dtype="S64")
         physical_phase_velocity = np.full((count, 4, 120), np.nan, dtype=np.float32)
         physical_valid_mask = np.zeros((count, 4, 120), dtype=np.bool_)
 
@@ -294,13 +352,23 @@ def run_inversion_job(
         assert ensemble_vs is not None
         assert ensemble_success is not None
         assert ensemble_status is not None
+        assert ensemble_iterations is not None
+        assert ensemble_evaluations is not None
+        assert ensemble_initial_objective is not None
         assert ensemble_objective is not None
+        assert ensemble_failure_code is not None
+        assert ensemble_message is not None
         assert ensemble_inlier_mask is not None
         for start_index, run in enumerate(ensemble.runs):
             ensemble_vs[row, start_index] = run.vs.astype(np.float32)
             ensemble_success[row, start_index] = run.success
             ensemble_status[row, start_index] = run.status
+            ensemble_iterations[row, start_index] = run.iterations
+            ensemble_evaluations[row, start_index] = run.evaluations
+            ensemble_initial_objective[row, start_index] = run.initial_objective
             ensemble_objective[row, start_index] = run.terms.total
+            ensemble_failure_code[row, start_index] = _start_failure_code(run)
+            ensemble_message[row, start_index] = _encoded_message(run.message)
         ensemble_inlier_mask[row] = ensemble.inlier_mask
         iterations[row] = sum(run.iterations for run in ensemble.runs)
         evaluations[row] = sum(run.evaluations for run in ensemble.runs)
@@ -311,6 +379,9 @@ def run_inversion_job(
         assert median_vs is not None
         assert p10_vs is not None
         assert p90_vs is not None
+        assert physical_success is not None
+        assert physical_status is not None
+        assert physical_failure_code is not None
         assert physical_phase_velocity is not None
         assert physical_valid_mask is not None
         median_vs[row] = ensemble.median_vs.astype(np.float32)
@@ -323,6 +394,8 @@ def run_inversion_job(
         data_misfit[row] = ensemble.representative_terms.data_misfit
         regularization[row] = ensemble.representative_terms.regularization
         status[row] = 0
+        success[row] = True
+        failure_code[row] = b""
         try:
             model = LayeredModel.from_vs(
                 ensemble.median_vs,
@@ -349,11 +422,13 @@ def run_inversion_job(
             )
             physical_phase_velocity[row] = normalized_physical
             physical_valid_mask[row] = physical_mask
+            physical_success[row] = True
+            physical_status[row] = 0
+            physical_failure_code[row] = b""
         except Exception:  # noqa: BLE001 - one sample must not abort its job
-            failure_code[row] = b"physical_solver_failure"
+            physical_status[row] = -1
+            physical_failure_code[row] = b"physical_solver_failure"
             continue
-        success[row] = True
-        failure_code[row] = b""
 
     batch = ResultBatch(
         sample_id=sample_id,
@@ -375,11 +450,19 @@ def run_inversion_job(
         ensemble_vs=ensemble_vs,
         ensemble_success=ensemble_success,
         ensemble_status=ensemble_status,
+        ensemble_iterations=ensemble_iterations,
+        ensemble_evaluations=ensemble_evaluations,
+        ensemble_initial_objective=ensemble_initial_objective,
         ensemble_objective=ensemble_objective,
+        ensemble_failure_code=ensemble_failure_code,
+        ensemble_message=ensemble_message,
         ensemble_inlier_mask=ensemble_inlier_mask,
         median_vs=median_vs,
         p10_vs=p10_vs,
         p90_vs=p90_vs,
+        physical_success=physical_success,
+        physical_status=physical_status,
+        physical_failure_code=physical_failure_code,
         physical_phase_velocity=physical_phase_velocity,
         physical_valid_mask=physical_valid_mask,
     )
@@ -397,7 +480,7 @@ def _resolve_inversion_workers(device_type: str, requested: int) -> int:
 
 def _validate_experiment_inputs(
     config: InversionConfig,
-) -> tuple[DatasetConfig, str, str, int]:
+) -> tuple[DatasetConfig, str, str, str, int]:
     dataset_config = load_dataset_config(config.dataset_config)
     dataset_manifest = validate_dataset_files(config.dataset_dir)
     dataset_hash = canonical_hash(dataset_config)
@@ -420,11 +503,124 @@ def _validate_experiment_inputs(
 
     device = resolve_inversion_device(config.device)
     worker_count = _resolve_inversion_workers(device.type, config.workers)
-    return dataset_config, dataset_hash, device.type, worker_count
+    return (
+        dataset_config,
+        dataset_hash,
+        dataset_manifest_sha256(dataset_manifest),
+        device.type,
+        worker_count,
+    )
 
 
 def _job_sample_ids(job: InversionJob) -> np.ndarray:
     return np.asarray([sample.sample_id for sample in job.samples], dtype=np.uint64)
+
+
+_THREAD_ENVIRONMENT_VARIABLES = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
+
+
+def _configure_child_threads(threads: int) -> None:
+    """Limit every spawned inversion child to explicit Torch/BLAS thread counts."""
+    value = str(threads)
+    for name in _THREAD_ENVIRONMENT_VARIABLES:
+        os.environ[name] = value
+    torch.set_num_threads(threads)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        if torch.get_num_interop_threads() != 1:
+            raise
+
+
+@contextmanager
+def _child_thread_environment(threads: int):
+    previous = {name: os.environ.get(name) for name in _THREAD_ENVIRONMENT_VARIABLES}
+    try:
+        for name in _THREAD_ENVIRONMENT_VARIABLES:
+            os.environ[name] = str(threads)
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _submit_inversion_job(
+    executor: ProcessPoolExecutor,
+    job: InversionJob,
+    worker_config: InversionConfig,
+    dataset_config: DatasetConfig,
+    manifest: ResultManifest,
+) -> Future[ResultManifest]:
+    return executor.submit(
+        run_inversion_job,
+        job,
+        worker_config,
+        dataset_config,
+        manifest,
+    )
+
+
+def _run_parallel_jobs(
+    jobs: tuple[InversionJob, ...],
+    *,
+    worker_count: int,
+    worker_config: InversionConfig,
+    dataset_config: DatasetConfig,
+    manifest: ResultManifest,
+) -> None:
+    iterator = iter(jobs)
+    with ExitStack() as stack:
+        stack.enter_context(_child_thread_environment(worker_config.threads_per_worker))
+        executor = stack.enter_context(
+            ProcessPoolExecutor(
+                max_workers=worker_count,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_configure_child_threads,
+                initargs=(worker_config.threads_per_worker,),
+            )
+        )
+        in_flight: set[Future[ResultManifest]] = set()
+        for _ in range(worker_count):
+            try:
+                job = next(iterator)
+            except StopIteration:
+                break
+            in_flight.add(
+                _submit_inversion_job(
+                    executor,
+                    job,
+                    worker_config,
+                    dataset_config,
+                    manifest,
+                )
+            )
+        while in_flight:
+            completed, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+            for future in completed:
+                in_flight.remove(future)
+                future.result()
+                try:
+                    job = next(iterator)
+                except StopIteration:
+                    continue
+                in_flight.add(
+                    _submit_inversion_job(
+                        executor,
+                        job,
+                        worker_config,
+                        dataset_config,
+                        manifest,
+                    )
+                )
 
 
 def _recover_published_jobs(
@@ -463,22 +659,30 @@ def run_inversion_experiment(
         raise TypeError("config must be an InversionConfig")
     if experiment not in {"full", "deep", "both"}:
         raise ValueError("experiment must be full, deep, or both")
-    dataset_config, dataset_hash, device_type, resolved_workers = (
-        _validate_experiment_inputs(config)
-    )
+    (
+        dataset_config,
+        dataset_hash,
+        dataset_manifest_digest,
+        device_type,
+        resolved_workers,
+    ) = _validate_experiment_inputs(config)
     jobs = build_jobs(
         config.dataset_dir,
         experiment,
         config.noise_scenarios,
         samples_per_kind=config.samples_per_kind,
+        deep_samples_per_job=config.deep_samples_per_job,
     )
+    expected_sample_ids_by_job = {job.name: _job_sample_ids(job) for job in jobs}
     manifest = initialize_result_manifest(
         config.output_dir,
         dataset_config_hash=dataset_hash,
+        dataset_manifest_sha256=dataset_manifest_digest,
         checkpoint=config.checkpoint,
         config=config,
         experiment=experiment,
         expected_jobs=tuple(job.name for job in jobs),
+        expected_sample_ids_by_job=expected_sample_ids_by_job,
     )
     manifest = _recover_published_jobs(config, jobs, manifest)
     assigned = assigned_jobs(
@@ -498,30 +702,23 @@ def run_inversion_experiment(
             for job in pending:
                 run_inversion_job(job, worker_config, dataset_config, manifest)
         else:
-            with ProcessPoolExecutor(
-                max_workers=worker_count,
-                mp_context=multiprocessing.get_context("spawn"),
-            ) as executor:
-                futures = [
-                    executor.submit(
-                        run_inversion_job,
-                        job,
-                        worker_config,
-                        dataset_config,
-                        manifest,
-                    )
-                    for job in pending
-                ]
-                for future in as_completed(futures):
-                    future.result()
+            _run_parallel_jobs(
+                pending,
+                worker_count=worker_count,
+                worker_config=worker_config,
+                dataset_config=dataset_config,
+                manifest=manifest,
+            )
 
     refreshed = initialize_result_manifest(
         config.output_dir,
         dataset_config_hash=dataset_hash,
+        dataset_manifest_sha256=dataset_manifest_digest,
         checkpoint=config.checkpoint,
         config=config,
         experiment=experiment,
         expected_jobs=tuple(job.name for job in jobs),
+        expected_sample_ids_by_job=expected_sample_ids_by_job,
     )
     if refreshed.complete:
         return validate_complete_results(config.output_dir)

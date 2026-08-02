@@ -582,9 +582,6 @@ def iqr_inlier_mask(objectives: ArrayLike) -> NDArray[np.bool_]:
         return keep
     q1, q3 = np.percentile(values[finite], [25.0, 75.0])
     iqr = q3 - q1
-    if iqr == 0.0:
-        keep[finite] = True
-        return keep
     keep[finite] = (values[finite] >= q1 - 1.5 * iqr) & (
         values[finite] <= q3 + 1.5 * iqr
     )
