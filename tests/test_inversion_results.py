@@ -555,6 +555,27 @@ def test_manifest_experiment_rejects_contradictory_job_prefix(
         )
 
 
+@pytest.mark.parametrize(
+    "expected_jobs",
+    [
+        (JOB_A,),
+        ("deep-clean-shard-00000",),
+    ],
+)
+def test_both_manifest_requires_full_and_deep_expected_jobs(
+    tmp_path: Path, checkpoint: Path, expected_jobs: tuple[str, ...]
+) -> None:
+    with pytest.raises(ValueError, match="both.*full.*deep|full.*deep.*both"):
+        initialize_result_manifest(
+            tmp_path / expected_jobs[0],
+            dataset_config_hash="a" * 64,
+            checkpoint=checkpoint,
+            config=_deep_config(),
+            experiment="both",
+            expected_jobs=expected_jobs,
+        )
+
+
 def test_result_paths_reject_symlinks(tmp_path: Path, result_manifest) -> None:
     outside = tmp_path / "outside.h5"
     outside.write_bytes(b"outside")

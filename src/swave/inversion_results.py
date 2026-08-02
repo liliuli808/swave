@@ -195,10 +195,11 @@ class ResultManifest:
         if len(set(expected)) != len(expected):
             raise ValueError("expected_jobs contains duplicate jobs")
         job_experiments = {_job_experiment(job) for job in expected}
-        allowed_job_experiments = (
-            {"full", "deep"} if self.experiment == "both" else {self.experiment}
-        )
-        if not job_experiments <= allowed_job_experiments:
+        if self.experiment == "both" and job_experiments != {"full", "deep"}:
+            raise ValueError(
+                "both result manifest requires full and deep expected jobs"
+            )
+        if self.experiment != "both" and job_experiments != {self.experiment}:
             raise ValueError(
                 "result manifest experiment and expected job prefixes disagree"
             )
