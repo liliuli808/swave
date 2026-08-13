@@ -15,7 +15,7 @@ from typing import Any
 import h5py
 import numpy as np
 import torch
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset, Sampler
 
@@ -187,6 +187,181 @@ class InverseNet(nn.Module):
                 f"input must have shape (batch, {self.config['input_dim']})"
             )
         return self.head(self.backbone(self.stem(value)))
+
+
+def _json_object_without_duplicate_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"JSON object contains duplicate key {key!r}")
+        result[key] = value
+    return result
+
+
+def _normalization_from_checkpoint(
+    payload: dict[str, object],
+) -> SupervisedNormalization:
+    arrays = {
+        "fill_values": np.asarray(payload.get("fill_values"), dtype=np.float32),
+        "input_mean": np.asarray(payload.get("input_mean"), dtype=np.float32),
+        "input_std": np.asarray(payload.get("input_std"), dtype=np.float32),
+        "target_mean": np.asarray(payload.get("target_mean"), dtype=np.float32),
+        "target_std": np.asarray(payload.get("target_std"), dtype=np.float32),
+    }
+    expected_shapes = {
+        "fill_values": (4, 119),
+        "input_mean": (INPUT_DIMENSION,),
+        "input_std": (INPUT_DIMENSION,),
+        "target_mean": (OUTPUT_DIMENSION,),
+        "target_std": (OUTPUT_DIMENSION,),
+    }
+    for name, values in arrays.items():
+        if values.shape != expected_shapes[name] or not np.all(np.isfinite(values)):
+            raise ValueError(f"supervised checkpoint {name} is invalid")
+    if np.any(arrays["input_std"] <= 0) or np.any(arrays["target_std"] <= 0):
+        raise ValueError("supervised checkpoint normalization scales must be positive")
+    train_sample_count = payload.get("train_sample_count")
+    train_sample_digest = payload.get("train_sample_id_sha256")
+    if (
+        isinstance(train_sample_count, bool)
+        or not isinstance(train_sample_count, int)
+        or train_sample_count <= 0
+        or not isinstance(train_sample_digest, str)
+        or len(train_sample_digest) != 64
+    ):
+        raise ValueError("supervised checkpoint training identity is invalid")
+    return SupervisedNormalization(
+        fill_values=arrays["fill_values"].copy(),
+        input_mean=arrays["input_mean"].copy(),
+        input_std=arrays["input_std"].copy(),
+        target_mean=arrays["target_mean"].copy(),
+        target_std=arrays["target_std"].copy(),
+        train_sample_count=train_sample_count,
+        train_sample_id_sha256=train_sample_digest,
+    )
+
+
+def _same_normalization(
+    left: SupervisedNormalization, right: SupervisedNormalization
+) -> bool:
+    return (
+        left.train_sample_count == right.train_sample_count
+        and left.train_sample_id_sha256 == right.train_sample_id_sha256
+        and np.array_equal(left.fill_values, right.fill_values)
+        and np.array_equal(left.input_mean, right.input_mean)
+        and np.array_equal(left.input_std, right.input_std)
+        and np.array_equal(left.target_mean, right.target_mean)
+        and np.array_equal(left.target_std, right.target_std)
+    )
+
+
+@dataclass
+class SupervisedEnsemblePredictor:
+    """Validated equal-weight inference over fixed supervised best checkpoints."""
+
+    models: tuple[InverseNet, ...]
+    normalization: SupervisedNormalization
+    seeds: tuple[int, ...]
+    device: torch.device
+    checkpoint_sha256: tuple[str, ...]
+
+    @classmethod
+    def load(
+        cls, output_dir: Path | str, device: str = "auto"
+    ) -> SupervisedEnsemblePredictor:
+        directory = Path(output_dir)
+        identity_path = directory / "run-identity.json"
+        try:
+            with identity_path.open(encoding="utf-8") as handle:
+                identity = json.load(
+                    handle, object_pairs_hook=_json_object_without_duplicate_keys
+                )
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("supervised run identity is not readable JSON") from error
+        if not isinstance(identity, dict):
+            raise TypeError("supervised run identity must be a JSON object")
+        raw_seeds = identity.get("seed_ensemble")
+        if (
+            not isinstance(raw_seeds, list)
+            or not raw_seeds
+            or any(
+                isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
+                for seed in raw_seeds
+            )
+            or len(set(raw_seeds)) != len(raw_seeds)
+        ):
+            raise ValueError("supervised run seed ensemble is invalid")
+        seeds = tuple(raw_seeds)
+        selected_device = resolve_device(device)
+        models: list[InverseNet] = []
+        digests: list[str] = []
+        common_normalization: SupervisedNormalization | None = None
+        for seed in seeds:
+            path = directory / f"seed-{seed}-best.pt"
+            if not path.is_file():
+                raise ValueError(f"supervised checkpoint {path.name} is missing")
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+            if not isinstance(payload, dict):
+                raise TypeError("supervised checkpoint payload must be a mapping")
+            _validate_checkpoint_identity(payload, identity)
+            if payload.get("seed") != seed:
+                raise ValueError("supervised checkpoint seed does not match")
+            normalization = _normalization_from_checkpoint(payload)
+            if common_normalization is None:
+                common_normalization = normalization
+            elif not _same_normalization(common_normalization, normalization):
+                raise ValueError("supervised checkpoint normalization does not match")
+            model_config = payload.get("model_config")
+            if not isinstance(model_config, dict):
+                raise TypeError("supervised checkpoint model configuration is invalid")
+            model = InverseNet(**model_config)
+            model.load_state_dict(payload["model"])
+            model.to(selected_device)
+            model.eval()
+            models.append(model)
+            digests.append(hashlib.sha256(path.read_bytes()).hexdigest())
+        assert common_normalization is not None
+        return cls(
+            models=tuple(models),
+            normalization=common_normalization,
+            seeds=seeds,
+            device=selected_device,
+            checkpoint_sha256=tuple(digests),
+        )
+
+    def predict(
+        self, observed: ArrayLike, valid_mask: ArrayLike
+    ) -> NDArray[np.float64]:
+        """Return one physical twenty-layer equal-weight ensemble prediction."""
+        values = np.asarray(observed, dtype=np.float64)
+        mask = np.asarray(valid_mask, dtype=np.bool_)
+        if values.shape != (4, 120) or mask.shape != (4, 120):
+            raise ValueError("observed and valid_mask must have shape (4, 120)")
+        if not np.all(np.isfinite(values[mask])):
+            raise ValueError("valid observations must be finite")
+        phase = values[:, DROP_FREQUENCY_COLUMNS:]
+        active = mask[:, DROP_FREQUENCY_COLUMNS:]
+        filled = np.where(active, phase, self.normalization.fill_values).reshape(-1)
+        normalized = (
+            filled - self.normalization.input_mean
+        ) / self.normalization.input_std
+        tensor = torch.from_numpy(normalized.astype(np.float32)).to(self.device)
+        target_mean = torch.as_tensor(
+            self.normalization.target_mean, device=self.device
+        )
+        target_std = torch.as_tensor(
+            self.normalization.target_std, device=self.device
+        )
+        predictions: list[Tensor] = []
+        with torch.no_grad():
+            for model in self.models:
+                predictions.append(model(tensor.unsqueeze(0))[0] * target_std + target_mean)
+        ensemble = torch.stack(predictions).mean(dim=0)
+        if not bool(torch.isfinite(ensemble).all()):
+            raise ArithmeticError("supervised ensemble prediction is non-finite")
+        return np.asarray(ensemble.cpu().numpy(), dtype=np.float64).copy()
 
 
 def compute_supervised_normalization(

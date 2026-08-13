@@ -16,11 +16,129 @@ from swave.supervised_inversion import (
     EpochShuffleSampler,
     InverseNet,
     SupervisedConfig,
+    SupervisedEnsemblePredictor,
     SupervisedHDF5BatchDataset,
     SupervisedHDF5Dataset,
     compute_supervised_normalization,
     train_supervised,
 )
+
+
+def _write_supervised_ensemble(
+    output_dir: Path,
+    *,
+    second_seed: int = 1,
+    second_fill_offset: float = 0.0,
+) -> None:
+    output_dir.mkdir()
+    model_config = {
+        "input_dim": 476,
+        "output_dim": 20,
+        "width": 4,
+        "blocks": 0,
+        "dropout": 0.0,
+    }
+    identity = {
+        "schema_version": 1,
+        "split_policy": SPLIT_POLICY,
+        "dataset_config_hash": "fixture-config",
+        "dataset_manifest_sha256": "a" * 64,
+        "train_sample_count": 80,
+        "train_sample_id_sha256": "b" * 64,
+        "training_configuration_sha256": "c" * 64,
+        "seed_ensemble": [0, 1],
+        "epoch_randomness": "sha256-derived-from-seed-and-epoch-v1",
+        "batch_order": "contiguous-hdf5-spans-epoch-shuffled-v1",
+        "model_config": model_config,
+    }
+    (output_dir / "run-identity.json").write_text(
+        json.dumps(identity), encoding="utf-8"
+    )
+    for index, (seed, normalized_bias) in enumerate(((0, 1.0), (second_seed, 3.0))):
+        model = InverseNet(**model_config)
+        with torch.no_grad():
+            for parameter in model.parameters():
+                parameter.zero_()
+            model.head[1].bias.fill_(normalized_bias)
+        fill = np.full((4, 119), 7.0, dtype=np.float32)
+        if index == 1:
+            fill += second_fill_offset
+        payload = {
+            **identity,
+            "seed": seed,
+            "fill_values": fill,
+            "input_mean": np.full(476, 7.0, dtype=np.float32),
+            "input_std": np.full(476, 2.0, dtype=np.float32),
+            "target_mean": np.full(20, 10.0, dtype=np.float32),
+            "target_std": np.full(20, 2.0, dtype=np.float32),
+            "model": model.state_dict(),
+        }
+        torch.save(payload, output_dir / f"seed-{index}-best.pt")
+
+
+def test_supervised_ensemble_predictor_applies_training_preprocessing_and_mean(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "run"
+    _write_supervised_ensemble(output_dir)
+    observed = np.full((4, 120), 7.0, dtype=np.float64)
+    valid = np.ones((4, 120), dtype=np.bool_)
+    observed[2, 25] = np.nan
+    valid[2, 25] = False
+
+    predictor = SupervisedEnsemblePredictor.load(output_dir, device="cpu")
+    prediction = predictor.predict(observed, valid)
+
+    assert prediction.shape == (20,)
+    np.testing.assert_allclose(prediction, 14.0)
+    assert predictor.seeds == (0, 1)
+    assert len(predictor.checkpoint_sha256) == 2
+    assert all(len(value) == 64 for value in predictor.checkpoint_sha256)
+
+
+def test_supervised_ensemble_predictor_requires_every_ordered_checkpoint(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "run"
+    _write_supervised_ensemble(output_dir)
+    (output_dir / "seed-1-best.pt").unlink()
+
+    with pytest.raises(ValueError, match="seed-1-best.pt"):
+        SupervisedEnsemblePredictor.load(output_dir, device="cpu")
+
+
+def test_supervised_ensemble_predictor_rejects_checkpoint_seed_mismatch(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "run"
+    _write_supervised_ensemble(output_dir, second_seed=7)
+
+    with pytest.raises(ValueError, match="seed"):
+        SupervisedEnsemblePredictor.load(output_dir, device="cpu")
+
+
+def test_supervised_ensemble_predictor_rejects_normalization_mismatch(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "run"
+    _write_supervised_ensemble(output_dir, second_fill_offset=0.5)
+
+    with pytest.raises(ValueError, match="normalization"):
+        SupervisedEnsemblePredictor.load(output_dir, device="cpu")
+
+
+def test_supervised_ensemble_predictor_rejects_nonfinite_valid_observation(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "run"
+    _write_supervised_ensemble(output_dir)
+    predictor = SupervisedEnsemblePredictor.load(output_dir, device="cpu")
+    observed = np.ones((4, 120), dtype=np.float64)
+    valid = np.ones((4, 120), dtype=np.bool_)
+    observed[0, 10] = np.nan
+
+    with pytest.raises(ValueError, match="valid observations"):
+        predictor.predict(observed, valid)
 
 
 @pytest.fixture
