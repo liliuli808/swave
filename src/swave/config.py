@@ -419,8 +419,8 @@ class HybridInversionConfig:
             or not 0 < self.prior_weight_min <= 1 <= self.prior_weight_max
         ):
             raise ValueError("prior weight bounds must contain one and be positive")
-        if not 0.3 <= self.vs_min < self.vs_max <= 2.6:
-            raise ValueError("Vs bounds must stay within the supported [0.3, 2.6]")
+        if self.vs_min != 0.3 or self.vs_max != 2.6:
+            raise ValueError("hybrid Vs bounds must be exactly [0.3, 2.6]")
         if self.reference_width > self.vs_max - self.vs_min:
             raise ValueError("reference_width is wider than the Vs range")
         integer_fields = (
@@ -455,18 +455,28 @@ class HybridInversionConfig:
             or not 0 < self.relative_tolerance < 1
         ):
             raise ValueError("relative_tolerance must be finite and in (0, 1)")
-        if (
-            not self.noise_scenarios
-            or len(set(self.noise_scenarios)) != len(self.noise_scenarios)
-        ):
-            raise ValueError("noise_scenarios must be nonempty and unique")
-        if any(
-            scenario not in {"clean", "noise_1pct"}
-            for scenario in self.noise_scenarios
-        ):
-            raise ValueError("noise_scenarios contain an unsupported value")
+        if len(set(self.noise_scenarios)) != len(self.noise_scenarios):
+            raise ValueError("noise_scenarios must be unique")
+        if set(self.noise_scenarios) != {"clean", "noise_1pct"}:
+            raise ValueError(
+                "noise_scenarios must contain exactly clean and noise_1pct"
+            )
         if self.device not in {"auto", "cpu", "cuda", "mps"}:
             raise ValueError("device must be auto, cpu, cuda, or mps")
+        canonical_controls = {
+            "mode_weights": ((4.0, 1.0, 1.0, 1.0), self.mode_weights),
+            "smoothness_lambda": (1e-2, self.smoothness_lambda),
+            "regularization_type": ("adaptive", self.regularization_type),
+            "reference_width": (0.7, self.reference_width),
+            "max_iterations": (100, self.max_iterations),
+            "relative_tolerance": (1e-5, self.relative_tolerance),
+            "seed": (20_260_727, self.seed),
+        }
+        for name, (expected, actual) in canonical_controls.items():
+            if actual != expected:
+                raise ValueError(
+                    f"hybrid {name} must match the canonical baseline protocol"
+                )
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> HybridInversionConfig:
@@ -525,6 +535,7 @@ def hybrid_inversion_identity_hash(config: HybridInversionConfig) -> str:
     """Hash hybrid scientific controls while excluding execution placement."""
     payload = config.to_dict()
     for name in (
+        "output_dir",
         "device",
         "workers",
         "threads_per_worker",

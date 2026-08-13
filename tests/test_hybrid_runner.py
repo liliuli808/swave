@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,12 @@ from swave.hybrid_runner import (
     HybridJob,
     HybridPairOutcome,
     PreparedHybridSample,
+    _allocate_batch,
+    _configure_child_threads,
+    _record_run,
+    _run_job_process,
+    _safe_invert,
+    _spawn_context,
     assigned_hybrid_jobs,
     build_hybrid_jobs,
     choose_prior_lambda,
@@ -82,6 +89,109 @@ def test_choose_prior_lambda_rejects_incomplete_metrics(
         choose_prior_lambda(errors)
 
 
+def test_hybrid_workers_use_spawn_and_explicit_thread_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        runner_module.runner_torch,
+        "set_num_threads",
+        lambda value: calls.append(("threads", value)),
+    )
+    monkeypatch.setattr(
+        runner_module.runner_torch,
+        "set_num_interop_threads",
+        lambda value: calls.append(("interop", value)),
+    )
+    for name in runner_module._THREAD_ENVIRONMENT_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+
+    _configure_child_threads(2)
+
+    assert _spawn_context().get_start_method() == "spawn"
+    for name in runner_module._THREAD_ENVIRONMENT_VARIABLES:
+        assert os.environ[name] == "2"
+    assert calls == [("threads", 2), ("interop", 1)]
+
+
+def test_safe_invert_converts_one_optimizer_exception_to_canonical_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runner_module,
+        "invert_one",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ArithmeticError("objective is non-finite")
+        ),
+    )
+
+    run = _safe_invert(
+        object(),
+        np.ones(20),
+        np.full(20, 0.3),
+        np.full(20, 2.6),
+        HybridInversionConfig(),
+    )
+
+    assert run.success is False
+    assert run.status == -1
+    assert np.all(np.isnan(run.vs))
+    assert np.all(np.isnan(run.predicted_phase_velocity))
+    assert np.isnan(run.terms.total)
+
+
+def test_unsuccessful_optimizer_result_keeps_scientific_fields_missing(
+    tmp_path: Path,
+) -> None:
+    job = HybridJob(
+        name="hybrid-test-clean-shard-00000",
+        split="test",
+        noise="clean",
+        samples=(_sample(85, tmp_path / "unused.h5"),),
+    )
+    arrays = _allocate_batch(job)
+    unsuccessful = replace(_run(1.1), success=False, status=1, message="maxiter")
+
+    _record_run(arrays, 0, "control", unsuccessful)
+
+    assert arrays["control_success"].tolist() == [False]
+    assert arrays["control_failure_code"].tolist() == [b"optimizer_failure"]
+    assert np.isnan(arrays["control_total"][0])
+    assert np.all(np.isnan(arrays["control_vs"][0]))
+    assert np.all(np.isnan(arrays["control_prediction"][0]))
+
+
+def test_process_worker_reuses_predictors_between_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    predictors = (object(), object())
+    loads: list[HybridInversionConfig] = []
+    calls: list[tuple[object, object]] = []
+    monkeypatch.setattr(runner_module, "_WORKER_PREDICTORS", None)
+    monkeypatch.setattr(
+        runner_module,
+        "_load_predictors",
+        lambda config: loads.append(config) or predictors,
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_run_hybrid_job_with_predictors",
+        lambda job, config, dataset_config, manifest, surrogate, supervised: (
+            calls.append((surrogate, supervised)) or manifest
+        ),
+    )
+    config = HybridInversionConfig()
+    job = object()
+    dataset_config = DatasetConfig()
+    manifest = object()
+
+    assert _run_job_process(job, config, dataset_config, manifest) is manifest
+    assert _run_job_process(job, config, dataset_config, manifest) is manifest
+
+    assert loads == [config]
+    assert calls == [predictors, predictors]
+
+
 def _sample(sample_id: int, path: Path) -> InversionSample:
     return InversionSample(
         sample_id=sample_id,
@@ -126,11 +236,17 @@ def test_select_prior_lambda_uses_only_validation_samples_and_persists_identity(
         dataset_manifest_sha256="b" * 64,
         forward_checkpoint_sha256="c" * 64,
         supervised=SimpleNamespace(
-            checkpoint_sha256=("d" * 64, "e" * 64, "f" * 64)
+            checkpoint_sha256=("d" * 64, "e" * 64, "f" * 64),
+            seeds=(0, 1, 2),
         ),
+        supervised_run_identity_sha256="1" * 64,
         surrogate=object(),
     )
-    monkeypatch.setattr(runner_module, "_validated_inputs", lambda _: context)
+    monkeypatch.setattr(
+        runner_module,
+        "_validated_inputs",
+        lambda _: (_ for _ in ()).throw(AssertionError("inputs were reloaded")),
+    )
     monkeypatch.setattr(
         runner_module,
         "select_observation_samples_by_kind",
@@ -155,15 +271,22 @@ def test_select_prior_lambda_uses_only_validation_samples_and_persists_identity(
         lambda sample: np.ones(20, dtype=np.float64),
     )
 
-    path = select_prior_lambda(config)
+    path = select_prior_lambda(config, _inputs=context)
     payload = json.loads(path.read_text(encoding="utf-8"))
 
     assert payload["selected_prior_lambda"] == pytest.approx(0.01)
     assert payload["validation_sample_ids"] == [80, 81, 82, 83]
     assert payload["validation_sample_count"] == 4
+    assert payload["supervised_seeds"] == [0, 1, 2]
+    assert payload["supervised_run_identity_sha256"] == "1" * 64
     assert payload["candidate_mae_km_s"] == pytest.approx(
         {"0.001": 0.2, "0.01": 0.1, "0.1": 0.1}
     )
+
+    payload["selected_prior_lambda"] = 0.1
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="selected prior lambda"):
+        select_prior_lambda(config, _inputs=context)
 
 
 def test_tuning_reports_missing_supervised_best_before_dataset_work(
@@ -211,11 +334,17 @@ def test_run_hybrid_job_persists_paired_objective_terms(
         dataset_config_hash="a" * 64,
         dataset_manifest_sha256="b" * 64,
         forward_checkpoint=forward,
-        supervised_checkpoint_sha256=("c" * 64,),
+        supervised_checkpoint_sha256=("c" * 64, "f" * 64, "1" * 64),
+        supervised_seeds=(0, 1, 2),
+        supervised_run_identity_sha256="d" * 64,
+        tuning_sha256="e" * 64,
         config=config,
         selected_prior_lambda=0.1,
         expected_sample_ids_by_job={
             job.name: np.array([85], dtype=np.uint64),
+            "hybrid-test-noise_1pct-shard-00000": np.array(
+                [85], dtype=np.uint64
+            ),
         },
     )
     reference = ReferenceModel(
@@ -258,3 +387,65 @@ def test_run_hybrid_job_persists_paired_objective_terms(
     np.testing.assert_allclose(batch.control_vs, 1.1)
     np.testing.assert_allclose(batch.hybrid_vs, 1.15)
     assert batch.hybrid_learning_prior[0] == pytest.approx(0.15)
+
+
+def test_run_hybrid_job_records_one_preparation_failure_without_losing_shard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forward = tmp_path / "forward.pt"
+    forward.write_bytes(b"forward")
+    config = replace(
+        HybridInversionConfig(),
+        forward_checkpoint=forward,
+        output_dir=tmp_path / "results",
+        device="cpu",
+        workers=1,
+    )
+    sample = _sample(85, tmp_path / "unused.h5")
+    job = HybridJob(
+        name="hybrid-test-clean-shard-00000",
+        split="test",
+        noise="clean",
+        samples=(sample,),
+    )
+    manifest = initialize_hybrid_manifest(
+        config.output_dir,
+        split="test",
+        dataset_config_hash="a" * 64,
+        dataset_manifest_sha256="b" * 64,
+        forward_checkpoint=forward,
+        supervised_checkpoint_sha256=("c" * 64, "f" * 64, "1" * 64),
+        supervised_seeds=(0, 1, 2),
+        supervised_run_identity_sha256="d" * 64,
+        tuning_sha256="e" * 64,
+        config=config,
+        selected_prior_lambda=0.1,
+        expected_sample_ids_by_job={
+            job.name: np.array([85], dtype=np.uint64),
+            "hybrid-test-noise_1pct-shard-00000": np.array(
+                [85], dtype=np.uint64
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        runner_module, "_load_predictors", lambda config: (object(), object())
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_prepare_sample",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ArithmeticError("layer sensitivity is invalid")
+        ),
+    )
+
+    run_hybrid_job(job, config, DatasetConfig(), manifest)
+
+    batch = validate_hybrid_result_shard(
+        config.output_dir / f"{job.name}.h5", manifest=manifest
+    )
+    assert batch.preparation_success.tolist() == [False]
+    assert batch.preparation_failure_code.tolist() == [b"sensitivity_failure"]
+    assert batch.control_failure_code.tolist() == [b"sensitivity_failure"]
+    assert batch.hybrid_failure_code.tolist() == [b"sensitivity_failure"]
+    assert np.all(np.isnan(batch.supervised_vs))
+    assert np.all(np.isnan(batch.sensitivity))

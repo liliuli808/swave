@@ -143,8 +143,13 @@ def test_loads_hybrid_toml_and_rejects_unknown_keys(tmp_path: Path) -> None:
         ({"sensitivity_epsilon_fraction": 0.0}, "epsilon"),
         ({"prior_weight_min": 1.1}, "weight bounds"),
         ({"prior_weight_max": 0.9}, "weight bounds"),
+        ({"vs_min": 0.4}, "exactly"),
+        ({"vs_max": 2.5}, "exactly"),
+        ({"smoothness_lambda": 0.02}, "canonical baseline"),
+        ({"seed": 42}, "canonical baseline"),
         ({"validation_samples_per_kind": 0}, "validation_samples_per_kind"),
         ({"noise_scenarios": ("clean", "clean")}, "unique"),
+        ({"noise_scenarios": ("clean",)}, "exactly"),
         ({"task_index": 2, "task_count": 2}, "task_index"),
         ({"workers": False}, "workers"),
     ],
@@ -160,6 +165,7 @@ def test_hybrid_identity_hash_excludes_only_execution_controls() -> None:
     base = HybridInversionConfig()
     operational = dataclasses.replace(
         base,
+        output_dir=Path("elsewhere"),
         device="cpu",
         workers=3,
         threads_per_worker=2,

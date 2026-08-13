@@ -20,7 +20,7 @@ from numpy.typing import NDArray
 from . import __version__
 from .config import HybridInversionConfig, hybrid_inversion_identity_hash
 from .inversion_results import checkpoint_sha256, sample_id_sha256, software_sha256
-from .splits import SPLIT_POLICY
+from .splits import SPLIT_POLICY, mask_for_split
 
 HybridSplit = Literal["test", "inversion"]
 
@@ -62,6 +62,8 @@ class HybridResultBatch:
     supervised_vs: NDArray[np.float32]
     sensitivity: NDArray[np.float64]
     prior_weights: NDArray[np.float64]
+    preparation_success: NDArray[np.bool_]
+    preparation_failure_code: NDArray[np.bytes_]
     control_success: NDArray[np.bool_]
     control_status: NDArray[np.int32]
     control_failure_code: NDArray[np.bytes_]
@@ -86,7 +88,14 @@ class HybridResultBatch:
     hybrid_vs: NDArray[np.float32]
     hybrid_prediction: NDArray[np.float32]
 
-    def validate(self) -> None:
+    def validate(
+        self,
+        *,
+        vs_min: float = 0.3,
+        vs_max: float = 2.6,
+        prior_weight_min: float = 0.25,
+        prior_weight_max: float = 4.0,
+    ) -> None:
         if not isinstance(self.sample_id, np.ndarray) or self.sample_id.dtype != np.uint64:
             raise ValueError("sample_id must be a uint64 vector")
         count = len(self.sample_id)
@@ -103,14 +112,41 @@ class HybridResultBatch:
             np.float32,
             (count, 4, 120),
         )
-        if not np.all(np.isfinite(self.observed_phase_velocity[self.valid_mask])):
+        preparation_success = _require_array(
+            self.preparation_success,
+            "preparation_success",
+            np.bool_,
+            (count,),
+        )
+        preparation_codes = self.preparation_failure_code
+        if (
+            not isinstance(preparation_codes, np.ndarray)
+            or preparation_codes.shape != (count,)
+            or preparation_codes.dtype.kind != "S"
+            or preparation_codes.dtype.itemsize > 64
+        ):
+            raise ValueError("preparation_failure_code has an invalid schema")
+        decoded_preparation_codes = _decode_codes(preparation_codes)
+        if np.any(preparation_success != (decoded_preparation_codes == "")):
+            raise ValueError(
+                "preparation_failure_code disagrees with preparation_success"
+            )
+        active_observations = preparation_success[:, None, None] & self.valid_mask
+        if not np.all(np.isfinite(self.observed_phase_velocity[active_observations])):
             raise ValueError("valid observations must be finite")
-        if np.any(self.observed_phase_velocity[self.valid_mask] <= 0):
+        if np.any(self.observed_phase_velocity[active_observations] <= 0):
             raise ValueError("valid observations must be positive")
+        if not np.all(np.isnan(self.observed_phase_velocity[~active_observations])):
+            raise ValueError("inactive observations must be NaN")
         for name in ("reference_vs", "supervised_vs"):
             values = _require_array(getattr(self, name), name, np.float32, (count, 20))
-            if not np.all(np.isfinite(values)) or np.any((values < 0.3) | (values > 2.6)):
+            if not np.all(np.isfinite(values[preparation_success])) or np.any(
+                (values[preparation_success] < vs_min)
+                | (values[preparation_success] > vs_max)
+            ):
                 raise ValueError(f"{name} must contain finite globally bounded profiles")
+            if not np.all(np.isnan(values[~preparation_success])):
+                raise ValueError(f"{name} must be NaN when preparation failed")
         sensitivity = _require_array(
             self.sensitivity, "sensitivity", np.float64, (count, 20)
         )
@@ -118,21 +154,54 @@ class HybridResultBatch:
             self.prior_weights, "prior_weights", np.float64, (count, 20)
         )
         if (
-            not np.all(np.isfinite(sensitivity))
-            or np.any(sensitivity < 0)
-            or np.any(np.all(sensitivity == 0, axis=1))
+            not np.all(np.isfinite(sensitivity[preparation_success]))
+            or np.any(sensitivity[preparation_success] < 0)
+            or np.any(np.all(sensitivity[preparation_success] == 0, axis=1))
         ):
             raise ValueError("sensitivity rows must be finite and nonzero")
-        if not np.all(np.isfinite(weights)) or np.any(
-            (weights < 0.25) | (weights > 4.0)
+        if not np.all(np.isfinite(weights[preparation_success])) or np.any(
+            (weights[preparation_success] < prior_weight_min)
+            | (weights[preparation_success] > prior_weight_max)
         ):
-            raise ValueError("prior_weights must stay within [0.25, 4.0]")
-        if not np.allclose(weights.mean(axis=1), 1.0, rtol=0.0, atol=1e-12):
+            raise ValueError("prior_weights exceed the configured bounds")
+        if not np.allclose(
+            weights[preparation_success].mean(axis=1),
+            1.0,
+            rtol=0.0,
+            atol=1e-12,
+        ):
             raise ValueError("prior_weights must have unit row means")
-        self._validate_outcome("control", has_learning_prior=False)
-        self._validate_outcome("hybrid", has_learning_prior=True)
+        if not np.all(np.isnan(sensitivity[~preparation_success])) or not np.all(
+            np.isnan(weights[~preparation_success])
+        ):
+            raise ValueError("prior arrays must be NaN when preparation failed")
+        self._validate_outcome(
+            "control",
+            has_learning_prior=False,
+            preparation_success=preparation_success,
+            preparation_codes=decoded_preparation_codes,
+            vs_min=vs_min,
+            vs_max=vs_max,
+        )
+        self._validate_outcome(
+            "hybrid",
+            has_learning_prior=True,
+            preparation_success=preparation_success,
+            preparation_codes=decoded_preparation_codes,
+            vs_min=vs_min,
+            vs_max=vs_max,
+        )
 
-    def _validate_outcome(self, prefix: str, *, has_learning_prior: bool) -> None:
+    def _validate_outcome(
+        self,
+        prefix: str,
+        *,
+        has_learning_prior: bool,
+        preparation_success: NDArray[np.bool_],
+        preparation_codes: NDArray[np.str_],
+        vs_min: float,
+        vs_max: float,
+    ) -> None:
         count = len(self.sample_id)
         success = _require_array(
             getattr(self, f"{prefix}_success"),
@@ -157,6 +226,10 @@ class HybridResultBatch:
         decoded = _decode_codes(codes)
         if np.any(success != (decoded == "")):
             raise ValueError(f"{prefix}_failure_code disagrees with success")
+        if np.any(success & ~preparation_success) or np.any(
+            decoded[~preparation_success] != preparation_codes[~preparation_success]
+        ):
+            raise ValueError(f"{prefix} outcome disagrees with preparation failure")
         for suffix in ("iterations", "evaluations"):
             values = _require_array(
                 getattr(self, f"{prefix}_{suffix}"),
@@ -188,6 +261,10 @@ class HybridResultBatch:
                 values[scientific_finite] < 0
             ):
                 raise ValueError(f"{prefix}_{suffix} is invalid for successful rows")
+            if not np.all(np.isnan(values[~success])):
+                raise ValueError(
+                    f"{prefix}_{suffix} must be NaN for failed rows"
+                )
         expected_total = scalars["data_misfit"] + scalars["smoothness"]
         if has_learning_prior:
             expected_total = expected_total + scalars["learning_prior"]
@@ -211,11 +288,17 @@ class HybridResultBatch:
             (count, 4, 120),
         )
         if not np.all(np.isfinite(profile[success])) or np.any(
-            (profile[success] < 0.3) | (profile[success] > 2.6)
+            (profile[success] < vs_min) | (profile[success] > vs_max)
         ):
             raise ValueError(f"{prefix}_vs is invalid for successful rows")
         if not np.all(np.isfinite(prediction[success])):
             raise ValueError(f"{prefix}_prediction is invalid for successful rows")
+        if not np.all(np.isnan(profile[~success])) or not np.all(
+            np.isnan(prediction[~success])
+        ):
+            raise ValueError(
+                f"{prefix} scientific arrays must be NaN for failed rows"
+            )
 
 
 @dataclass(frozen=True)
@@ -226,9 +309,16 @@ class HybridManifest:
     dataset_manifest_sha256: str
     forward_checkpoint_sha256: str
     supervised_checkpoint_sha256: tuple[str, ...]
+    supervised_seeds: tuple[int, ...]
+    supervised_run_identity_sha256: str
+    tuning_sha256: str
     split_policy: str
     hybrid_config_hash: str
     selected_prior_lambda: float
+    vs_min: float
+    vs_max: float
+    prior_weight_min: float
+    prior_weight_max: float
     expected_jobs: tuple[str, ...]
     expected_job_sample_count: dict[str, int]
     expected_job_sample_id_sha256: dict[str, str]
@@ -246,8 +336,45 @@ class HybridManifest:
             raise ValueError("hybrid manifest split is invalid")
         if not np.isfinite(self.selected_prior_lambda) or self.selected_prior_lambda <= 0:
             raise ValueError("selected_prior_lambda must be finite and positive")
+        if self.supervised_seeds != (0, 1, 2):
+            raise ValueError("hybrid manifest requires supervised seeds 0, 1, and 2")
+        if len(self.supervised_checkpoint_sha256) != len(self.supervised_seeds):
+            raise ValueError("hybrid manifest supervised checkpoint count is invalid")
+        if any(
+            not isinstance(value, str) or len(value) != 64
+            for value in self.supervised_checkpoint_sha256
+        ):
+            raise ValueError("hybrid manifest supervised checkpoint digest is invalid")
+        for name in (
+            "dataset_manifest_sha256",
+            "forward_checkpoint_sha256",
+            "supervised_run_identity_sha256",
+            "tuning_sha256",
+            "software_sha256",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or len(value) != 64:
+                raise ValueError(f"{name} must be a SHA-256 digest")
+        if not 0.3 <= self.vs_min < self.vs_max <= 2.6:
+            raise ValueError("hybrid manifest Vs bounds are invalid")
+        if not 0 < self.prior_weight_min <= 1 <= self.prior_weight_max:
+            raise ValueError("hybrid manifest prior-weight bounds are invalid")
         if not self.expected_jobs or len(set(self.expected_jobs)) != len(self.expected_jobs):
             raise ValueError("expected_jobs must be nonempty and unique")
+        noise_scenarios = {
+            noise
+            for job in self.expected_jobs
+            for noise in ("clean", "noise_1pct")
+            if f"-{noise}-" in job
+        }
+        if noise_scenarios != {"clean", "noise_1pct"}:
+            raise ValueError("expected_jobs must cover clean and noise_1pct")
+        if any(
+            not job.startswith(f"hybrid-{self.split}-")
+            or not any(f"-{noise}-" in job for noise in noise_scenarios)
+            for job in self.expected_jobs
+        ):
+            raise ValueError("expected_jobs do not match the hybrid split protocol")
         if set(self.completed_jobs) - set(self.expected_jobs):
             raise ValueError("completed_jobs contains an unexpected job")
         if self.complete != (set(self.completed_jobs) == set(self.expected_jobs)):
@@ -259,6 +386,7 @@ def _manifest_payload(manifest: HybridManifest) -> dict[str, object]:
     payload["supervised_checkpoint_sha256"] = list(
         manifest.supervised_checkpoint_sha256
     )
+    payload["supervised_seeds"] = list(manifest.supervised_seeds)
     payload["expected_jobs"] = list(manifest.expected_jobs)
     payload["completed_jobs"] = list(manifest.completed_jobs)
     return payload
@@ -272,10 +400,19 @@ def _atomic_json(path: Path, payload: dict[str, object]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     temporary.replace(path)
+    _fsync_directory(path.parent)
 
 
 def _write_manifest(path: Path, manifest: HybridManifest) -> None:
     _atomic_json(path, _manifest_payload(manifest))
+
+
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _load_manifest(path: Path) -> HybridManifest:
@@ -289,6 +426,7 @@ def _load_manifest(path: Path) -> HybridManifest:
     payload["supervised_checkpoint_sha256"] = tuple(
         payload["supervised_checkpoint_sha256"]
     )
+    payload["supervised_seeds"] = tuple(payload["supervised_seeds"])
     payload["expected_jobs"] = tuple(payload["expected_jobs"])
     payload["completed_jobs"] = tuple(payload["completed_jobs"])
     return HybridManifest(**payload)
@@ -307,14 +445,31 @@ def _manifest_identity(manifest: HybridManifest) -> tuple[object, ...]:
         manifest.dataset_manifest_sha256,
         manifest.forward_checkpoint_sha256,
         manifest.supervised_checkpoint_sha256,
+        manifest.supervised_seeds,
+        manifest.supervised_run_identity_sha256,
+        manifest.tuning_sha256,
         manifest.split_policy,
         manifest.hybrid_config_hash,
         manifest.selected_prior_lambda,
+        manifest.vs_min,
+        manifest.vs_max,
+        manifest.prior_weight_min,
+        manifest.prior_weight_max,
         manifest.expected_jobs,
         tuple(sorted(manifest.expected_job_sample_count.items())),
         tuple(sorted(manifest.expected_job_sample_id_sha256.items())),
         manifest.software_sha256,
     )
+
+
+def _scientific_identity_sha256(manifest: HybridManifest) -> str:
+    payload = json.dumps(
+        _manifest_identity(manifest),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def initialize_hybrid_manifest(
@@ -325,6 +480,9 @@ def initialize_hybrid_manifest(
     dataset_manifest_sha256: str,
     forward_checkpoint: Path | str,
     supervised_checkpoint_sha256: tuple[str, ...],
+    supervised_seeds: tuple[int, ...],
+    supervised_run_identity_sha256: str,
+    tuning_sha256: str,
     config: HybridInversionConfig,
     selected_prior_lambda: float,
     expected_sample_ids_by_job: dict[str, NDArray[np.uint64]],
@@ -344,9 +502,16 @@ def initialize_hybrid_manifest(
         dataset_manifest_sha256=dataset_manifest_sha256,
         forward_checkpoint_sha256=checkpoint_sha256(forward_checkpoint),
         supervised_checkpoint_sha256=tuple(supervised_checkpoint_sha256),
+        supervised_seeds=tuple(supervised_seeds),
+        supervised_run_identity_sha256=supervised_run_identity_sha256,
+        tuning_sha256=tuning_sha256,
         split_policy=SPLIT_POLICY,
         hybrid_config_hash=hybrid_inversion_identity_hash(config),
         selected_prior_lambda=float(selected_prior_lambda),
+        vs_min=config.vs_min,
+        vs_max=config.vs_max,
+        prior_weight_min=config.prior_weight_min,
+        prior_weight_max=config.prior_weight_max,
         expected_jobs=jobs,
         expected_job_sample_count=counts,
         expected_job_sample_id_sha256=digests,
@@ -358,13 +523,14 @@ def initialize_hybrid_manifest(
         complete=False,
     )
     path = directory / "manifest.json"
-    if path.exists():
-        stored = _load_manifest(path)
-        if _manifest_identity(stored) != _manifest_identity(proposed):
-            raise ValueError("hybrid result manifest identity does not match")
-        return stored
-    _write_manifest(path, proposed)
-    return proposed
+    with _manifest_lock(directory):
+        if path.exists():
+            stored = _load_manifest(path)
+            if _manifest_identity(stored) != _manifest_identity(proposed):
+                raise ValueError("hybrid result manifest identity does not match")
+            return stored
+        _write_manifest(path, proposed)
+        return proposed
 
 
 def _content_sha256(handle: h5py.File) -> str:
@@ -389,7 +555,12 @@ def write_hybrid_result_shard(
     manifest: HybridManifest,
     job: str,
 ) -> Path:
-    batch.validate()
+    batch.validate(
+        vs_min=manifest.vs_min,
+        vs_max=manifest.vs_max,
+        prior_weight_min=manifest.prior_weight_min,
+        prior_weight_max=manifest.prior_weight_max,
+    )
     if job not in manifest.expected_jobs:
         raise ValueError("hybrid result job is not expected")
     if len(batch.sample_id) != manifest.expected_job_sample_count[job]:
@@ -397,20 +568,39 @@ def write_hybrid_result_shard(
     if sample_id_sha256(batch.sample_id) != manifest.expected_job_sample_id_sha256[job]:
         raise ValueError("hybrid result sample identity does not match")
     destination = Path(path)
+    if destination.name != f"{job}.h5":
+        raise ValueError("hybrid result path does not match the job name")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f"{destination.name}.tmp-{os.getpid()}")
-    with h5py.File(temporary, "w") as handle:
-        for field in fields(HybridResultBatch):
-            handle.create_dataset(field.name, data=getattr(batch, field.name))
-        handle.attrs["schema_version"] = manifest.schema_version
-        handle.attrs["job"] = job
-        handle.attrs["split"] = manifest.split
-        handle.attrs["hybrid_config_hash"] = manifest.hybrid_config_hash
-        handle.attrs["software_sha256"] = manifest.software_sha256
-        handle.attrs["sample_id_sha256"] = sample_id_sha256(batch.sample_id)
-        handle.attrs["content_sha256"] = _content_sha256(handle)
-        handle.flush()
-    temporary.replace(destination)
+    try:
+        with h5py.File(temporary, "w") as handle:
+            for field in fields(HybridResultBatch):
+                handle.create_dataset(field.name, data=getattr(batch, field.name))
+            handle.attrs["schema_version"] = manifest.schema_version
+            handle.attrs["job"] = job
+            handle.attrs["split"] = manifest.split
+            handle.attrs["hybrid_config_hash"] = manifest.hybrid_config_hash
+            handle.attrs["software_sha256"] = manifest.software_sha256
+            handle.attrs["scientific_identity_sha256"] = (
+                _scientific_identity_sha256(manifest)
+            )
+            handle.attrs["sample_id_sha256"] = sample_id_sha256(batch.sample_id)
+            handle.attrs["content_sha256"] = _content_sha256(handle)
+            handle.flush()
+        descriptor = os.open(temporary, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        validate_hybrid_result_shard(
+            temporary, manifest=manifest, expected_job=job
+        )
+        temporary.replace(destination)
+        _fsync_directory(destination.parent)
+    except BaseException:
+        if temporary.exists():
+            temporary.unlink()
+        raise
     return destination
 
 
@@ -419,6 +609,7 @@ def validate_hybrid_result_shard(
     *,
     manifest: HybridManifest | None = None,
     expected_sample_ids: NDArray[np.uint64] | None = None,
+    expected_job: str | None = None,
 ) -> HybridResultBatch:
     source = Path(path)
     try:
@@ -431,6 +622,9 @@ def validate_hybrid_result_shard(
                 raise ValueError("hybrid result content checksum is invalid")
             payload = {name: np.asarray(handle[name]) for name in names}
             job = str(handle.attrs.get("job", ""))
+            if expected_job is not None and job != expected_job:
+                raise ValueError("hybrid result job identity does not match")
+            stored_sample_digest = str(handle.attrs.get("sample_id_sha256", ""))
             if manifest is not None:
                 if job not in manifest.expected_jobs:
                     raise ValueError("hybrid result job is not in the manifest")
@@ -440,10 +634,32 @@ def validate_hybrid_result_shard(
                     raise ValueError("hybrid result configuration identity does not match")
                 if str(handle.attrs.get("software_sha256", "")) != manifest.software_sha256:
                     raise ValueError("hybrid result software identity does not match")
+                if str(
+                    handle.attrs.get("scientific_identity_sha256", "")
+                ) != _scientific_identity_sha256(manifest):
+                    raise ValueError("hybrid result scientific identity does not match")
     except OSError as error:
         raise ValueError("hybrid result shard is not readable HDF5") from error
     batch = HybridResultBatch(**payload)
-    batch.validate()
+    if manifest is None:
+        batch.validate()
+    else:
+        batch.validate(
+            vs_min=manifest.vs_min,
+            vs_max=manifest.vs_max,
+            prior_weight_min=manifest.prior_weight_min,
+            prior_weight_max=manifest.prior_weight_max,
+        )
+        if not np.all(mask_for_split(batch.sample_id, manifest.split)):
+            raise ValueError("hybrid result sample IDs do not belong to the split")
+    actual_sample_digest = sample_id_sha256(batch.sample_id)
+    if stored_sample_digest != actual_sample_digest:
+        raise ValueError("hybrid result stored sample identity does not match")
+    if manifest is not None and (
+        len(batch.sample_id) != manifest.expected_job_sample_count[job]
+        or actual_sample_digest != manifest.expected_job_sample_id_sha256[job]
+    ):
+        raise ValueError("hybrid result manifest sample identity does not match")
     if expected_sample_ids is not None and not np.array_equal(
         batch.sample_id, expected_sample_ids
     ):
@@ -474,7 +690,11 @@ def mark_hybrid_job_complete(
     with _manifest_lock(directory):
         manifest = _load_manifest(directory / "manifest.json")
         path = Path(shard_path)
-        validate_hybrid_result_shard(path, manifest=manifest)
+        if path != directory / f"{job}.h5":
+            raise ValueError("hybrid result path does not match the completed job")
+        validate_hybrid_result_shard(
+            path, manifest=manifest, expected_job=job
+        )
         completed = tuple(
             name for name in manifest.expected_jobs if name in {*manifest.completed_jobs, job}
         )
@@ -497,11 +717,15 @@ def mark_hybrid_job_complete(
 def validate_complete_hybrid_results(output_dir: Path | str) -> HybridManifest:
     directory = Path(output_dir)
     manifest = _load_manifest(directory / "manifest.json")
+    if manifest.software_sha256 != software_sha256():
+        raise ValueError("hybrid result software identity does not match this checkout")
     if not manifest.complete:
         raise ValueError("hybrid result manifest is incomplete")
     for job in manifest.expected_jobs:
         path = directory / f"{job}.h5"
         if _file_sha256(path) != manifest.job_sha256.get(job):
             raise ValueError("hybrid result shard checksum does not match")
-        validate_hybrid_result_shard(path, manifest=manifest)
+        validate_hybrid_result_shard(
+            path, manifest=manifest, expected_job=job
+        )
     return manifest

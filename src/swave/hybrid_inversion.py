@@ -67,16 +67,16 @@ def mean_dimensionless_sensitivity(
     if np.any(np.abs(prediction_values[active]) <= phase_floor):
         raise ArithmeticError("active predicted phase velocity is too close to zero")
 
+    active_prediction = prediction_values[active]
+    active_jacobian = jacobian_values[active]
+    active_weights = np.broadcast_to(weights[:, None], mask.shape)[active]
     dimensionless = np.abs(
-        jacobian_values
-        * values[None, None, :]
-        / prediction_values[:, :, None]
+        active_jacobian * values[None, :] / active_prediction[:, None]
     )
-    cell_weights = weights[:, None] * active
-    denominator = float(cell_weights.sum())
+    denominator = float(active_weights.sum())
     sensitivity = (
-        dimensionless * cell_weights[:, :, None]
-    ).sum(axis=(0, 1)) / denominator
+        dimensionless * active_weights[:, None]
+    ).sum(axis=0) / denominator
     if not np.all(np.isfinite(sensitivity)) or np.any(sensitivity < 0):
         raise ArithmeticError("layer sensitivity is invalid")
     if not np.any(sensitivity > 0):

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
 import h5py
 import numpy as np
+import torch as runner_torch
 from numpy.typing import NDArray
 
 from .config import (
@@ -42,7 +45,9 @@ from .hybrid_results import (
 )
 from .inversion import (
     DifferentiableSurrogate,
+    InversionObjective,
     InversionRun,
+    ObjectiveTerms,
     ReferenceModel,
     SurrogateObjective,
     apply_observation_noise,
@@ -61,6 +66,18 @@ from .splits import validate_checkpoint_split_policy
 from .supervised_inversion import SupervisedEnsemblePredictor
 
 HybridStage = Literal["tune", "test", "inversion", "all"]
+
+_THREAD_ENVIRONMENT_VARIABLES = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
+
+_WORKER_PREDICTORS: tuple[
+    DifferentiableSurrogate, SupervisedEnsemblePredictor
+] | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +115,7 @@ class _HybridInputs:
     dataset_config_hash: str
     dataset_manifest_sha256: str
     forward_checkpoint_sha256: str
+    supervised_run_identity_sha256: str
     surrogate: DifferentiableSurrogate
     supervised: SupervisedEnsemblePredictor
 
@@ -190,6 +208,8 @@ def _validated_inputs(config: HybridInversionConfig) -> _HybridInputs:
     supervised = SupervisedEnsemblePredictor.load(
         config.supervised_dir, config.device
     )
+    if supervised.seeds != (0, 1, 2):
+        raise ValueError("hybrid inversion requires supervised seeds 0, 1, and 2")
     dataset_config = load_dataset_config(config.dataset_config)
     manifest = validate_dataset_files(config.dataset_dir)
     dataset_hash = canonical_hash(dataset_config)
@@ -224,6 +244,7 @@ def _validated_inputs(config: HybridInversionConfig) -> _HybridInputs:
         dataset_config_hash=dataset_hash,
         dataset_manifest_sha256=manifest_digest,
         forward_checkpoint_sha256=checkpoint_sha256(config.forward_checkpoint),
+        supervised_run_identity_sha256=checkpoint_sha256(identity_path),
         surrogate=surrogate,
         supervised=supervised,
     )
@@ -354,21 +375,60 @@ def _invert_prepared_pair(
         prepared, prior_lambda, config, dataset_config, surrogate
     )
     lower, upper = _global_bounds(config)
-    keywords = {
-        "max_iterations": config.max_iterations,
-        "relative_tolerance": config.relative_tolerance,
-    }
-    control = invert_one(
-        control_objective, prepared.reference.vs, lower, upper, **keywords
+    control = _safe_invert(
+        control_objective,
+        prepared.reference.vs,
+        lower,
+        upper,
+        config,
     )
-    hybrid = invert_one(
-        hybrid_objective, prepared.reference.vs, lower, upper, **keywords
+    hybrid = _safe_invert(
+        hybrid_objective,
+        prepared.reference.vs,
+        lower,
+        upper,
+        config,
     )
+    if hybrid.success:
+        detailed = hybrid_objective.detailed_terms(hybrid.vs)
+    else:
+        detailed = HybridObjectiveTerms(*(float("nan") for _ in range(4)))
     return HybridPairOutcome(
         control=control,
         hybrid=hybrid,
-        hybrid_terms=hybrid_objective.detailed_terms(hybrid.vs),
+        hybrid_terms=detailed,
     )
+
+
+def _safe_invert(
+    objective: InversionObjective,
+    initial: NDArray[np.float64],
+    lower: NDArray[np.float64],
+    upper: NDArray[np.float64],
+    config: HybridInversionConfig,
+) -> InversionRun:
+    """Convert one optimizer exception into an independently storable failure."""
+    try:
+        return invert_one(
+            objective,
+            initial,
+            lower,
+            upper,
+            max_iterations=config.max_iterations,
+            relative_tolerance=config.relative_tolerance,
+        )
+    except (ArithmeticError, RuntimeError, ValueError) as error:
+        return InversionRun(
+            vs=np.full(20, np.nan, dtype=np.float64),
+            predicted_phase_velocity=np.full((4, 120), np.nan, dtype=np.float64),
+            success=False,
+            status=-1,
+            message=str(error),
+            iterations=0,
+            evaluations=0,
+            initial_objective=float("nan"),
+            terms=ObjectiveTerms(*(float("nan") for _ in range(3))),
+        )
 
 
 def _truth_vs(sample: InversionSample) -> NDArray[np.float64]:
@@ -401,6 +461,10 @@ def _tuning_identity(
         "supervised_checkpoint_sha256": list(
             inputs.supervised.checkpoint_sha256
         ),
+        "supervised_seeds": list(inputs.supervised.seeds),
+        "supervised_run_identity_sha256": (
+            inputs.supervised_run_identity_sha256
+        ),
         "hybrid_config_hash": hybrid_inversion_identity_hash(config),
         "software_sha256": software_sha256(),
         "validation_sample_count": len(sample_ids),
@@ -422,9 +486,62 @@ def _atomic_json(path: Path, payload: dict[str, object]) -> None:
     temporary.replace(path)
 
 
-def select_prior_lambda(config: HybridInversionConfig) -> Path:
+def _validate_tuning_payload(
+    payload: object,
+    identity: dict[str, object],
+    config: HybridInversionConfig,
+) -> float:
+    required = {
+        *identity,
+        "candidate_mae_km_s",
+        "selected_prior_lambda",
+        "selection_metric",
+        "tie_break",
+    }
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise ValueError("hybrid tuning fields do not match the schema")
+    for name, value in identity.items():
+        if payload[name] != value:
+            raise ValueError(f"hybrid tuning identity {name} does not match")
+    metrics = payload["candidate_mae_km_s"]
+    expected_keys = {str(value) for value in config.prior_lambda_candidates}
+    if not isinstance(metrics, dict) or set(metrics) != expected_keys:
+        raise ValueError("hybrid tuning candidate metrics are incomplete")
+    errors: dict[float, NDArray[np.float64]] = {}
+    for candidate in config.prior_lambda_candidates:
+        value = metrics[str(candidate)]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not np.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError("hybrid tuning candidate metrics are invalid")
+        errors[candidate] = np.asarray([float(value)], dtype=np.float64)
+    selected, _ = choose_prior_lambda(errors)
+    stored_selected = payload["selected_prior_lambda"]
+    if (
+        isinstance(stored_selected, bool)
+        or not isinstance(stored_selected, (int, float))
+        or float(stored_selected) != selected
+    ):
+        raise ValueError("hybrid tuning selected prior lambda is inconsistent")
+    if payload["selection_metric"] != (
+        "mean_vs_mae_across_validation_samples_layers_and_noise"
+    ):
+        raise ValueError("hybrid tuning selection metric is invalid")
+    if payload["tie_break"] != "smallest_prior_lambda":
+        raise ValueError("hybrid tuning tie break is invalid")
+    return selected
+
+
+def select_prior_lambda(
+    config: HybridInversionConfig,
+    *,
+    _inputs: _HybridInputs | None = None,
+) -> Path:
     """Select and persist prior strength using validation rows only."""
-    inputs = _validated_inputs(config)
+    inputs = _validated_inputs(config) if _inputs is None else _inputs
     samples = select_observation_samples_by_kind(
         config.dataset_dir,
         "validation",
@@ -436,9 +553,7 @@ def select_prior_lambda(config: HybridInversionConfig) -> Path:
     output = config.output_dir / "tuning.json"
     if output.exists():
         stored = json.loads(output.read_text(encoding="utf-8"))
-        for name, value in identity.items():
-            if stored.get(name) != value:
-                raise ValueError(f"hybrid tuning identity {name} does not match")
+        _validate_tuning_payload(stored, identity, config)
         return output
     errors_by_lambda: dict[float, list[float]] = {
         candidate: [] for candidate in config.prior_lambda_candidates
@@ -483,11 +598,16 @@ def select_prior_lambda(config: HybridInversionConfig) -> Path:
         "tie_break": "smallest_prior_lambda",
     }
     _atomic_json(output, report)
+    _validate_tuning_payload(report, identity, config)
     return output
 
 
-def _selected_prior_lambda(config: HybridInversionConfig) -> float:
-    path = select_prior_lambda(config)
+def _selected_prior_lambda(
+    config: HybridInversionConfig,
+    *,
+    inputs: _HybridInputs | None = None,
+) -> float:
+    path = select_prior_lambda(config, _inputs=inputs)
     payload = json.loads(path.read_text(encoding="utf-8"))
     value = float(payload["selected_prior_lambda"])
     if value not in config.prior_lambda_candidates:
@@ -506,6 +626,10 @@ def _allocate_batch(job: HybridJob) -> dict[str, NDArray[np.generic]]:
         "supervised_vs": np.full((count, 20), np.nan, np.float32),
         "sensitivity": np.full((count, 20), np.nan, np.float64),
         "prior_weights": np.full((count, 20), np.nan, np.float64),
+        "preparation_success": np.zeros(count, np.bool_),
+        "preparation_failure_code": np.full(
+            count, b"preparation_failure", dtype="S64"
+        ),
         **{
             name: np.zeros(count, np.bool_)
             for name in ("control_success", "hybrid_success")
@@ -559,6 +683,8 @@ def _record_run(
     arrays[f"{prefix}_failure_code"][row] = b"" if run.success else b"optimizer_failure"
     arrays[f"{prefix}_iterations"][row] = run.iterations
     arrays[f"{prefix}_evaluations"][row] = run.evaluations
+    if not run.success:
+        return
     arrays[f"{prefix}_initial_objective"][row] = run.initial_objective
     arrays[f"{prefix}_total"][row] = run.terms.total
     arrays[f"{prefix}_data_misfit"][row] = run.terms.data_misfit
@@ -574,11 +700,49 @@ def run_hybrid_job(
 ) -> HybridManifest:
     """Run and atomically publish one paired control/hybrid job."""
     surrogate, supervised = _load_predictors(config)
+    return _run_hybrid_job_with_predictors(
+        job, config, dataset_config, manifest, surrogate, supervised
+    )
+
+
+def _preparation_failure_code(error: BaseException) -> bytes:
+    message = str(error).lower()
+    if any(
+        token in message
+        for token in ("sensitivity", "jacobian", "phase velocity")
+    ):
+        return b"sensitivity_failure"
+    if "supervised" in message:
+        return b"supervised_failure"
+    if any(token in message for token in ("reference", "fundamental")):
+        return b"reference_failure"
+    return b"preparation_failure"
+
+
+def _run_hybrid_job_with_predictors(
+    job: HybridJob,
+    config: HybridInversionConfig,
+    dataset_config: DatasetConfig,
+    manifest: HybridManifest,
+    surrogate: DifferentiableSurrogate,
+    supervised: SupervisedEnsemblePredictor,
+) -> HybridManifest:
+    """Run one job with predictor instances owned by the current worker."""
     arrays = _allocate_batch(job)
     for row, sample in enumerate(job.samples):
-        prepared = _prepare_sample(
-            sample, job.noise, config, dataset_config, surrogate, supervised
-        )
+        try:
+            prepared = _prepare_sample(
+                sample, job.noise, config, dataset_config, surrogate, supervised
+            )
+        except (ArithmeticError, RuntimeError, ValueError) as error:
+            code = _preparation_failure_code(error)
+            arrays["preparation_failure_code"][row] = code
+            for prefix in ("control", "hybrid"):
+                arrays[f"{prefix}_status"][row] = -2
+                arrays[f"{prefix}_failure_code"][row] = code
+            continue
+        arrays["preparation_success"][row] = True
+        arrays["preparation_failure_code"][row] = b""
         arrays["observed_phase_velocity"][row] = prepared.observed.astype(np.float32)
         arrays["reference_vs"][row] = prepared.reference.vs.astype(np.float32)
         arrays["supervised_vs"][row] = prepared.learning_prior.vs.astype(np.float32)
@@ -592,7 +756,10 @@ def run_hybrid_job(
             surrogate,
         )
         _record_run(arrays, row, "control", outcome.control)
-        arrays["control_smoothness"][row] = outcome.control.terms.regularization
+        if outcome.control.success:
+            arrays["control_smoothness"][row] = (
+                outcome.control.terms.regularization
+            )
         _record_run(arrays, row, "hybrid", outcome.hybrid)
         arrays["hybrid_data_misfit"][row] = outcome.hybrid_terms.data_misfit
         arrays["hybrid_smoothness"][row] = (
@@ -618,7 +785,45 @@ def _run_job_process(
     dataset_config: DatasetConfig,
     manifest: HybridManifest,
 ) -> HybridManifest:
-    return run_hybrid_job(job, config, dataset_config, manifest)
+    global _WORKER_PREDICTORS
+    if _WORKER_PREDICTORS is None:
+        _WORKER_PREDICTORS = _load_predictors(config)
+    surrogate, supervised = _WORKER_PREDICTORS
+    return _run_hybrid_job_with_predictors(
+        job, config, dataset_config, manifest, surrogate, supervised
+    )
+
+
+def _spawn_context() -> multiprocessing.context.BaseContext:
+    """Use spawn so CUDA and threaded numerical runtimes are never forked."""
+    return multiprocessing.get_context("spawn")
+
+
+def _configure_child_threads(threads: int) -> None:
+    value = str(threads)
+    for name in _THREAD_ENVIRONMENT_VARIABLES:
+        os.environ[name] = value
+    runner_torch.set_num_threads(threads)
+    try:
+        runner_torch.set_num_interop_threads(1)
+    except RuntimeError:
+        if runner_torch.get_num_interop_threads() != 1:
+            raise
+
+
+@contextmanager
+def _child_thread_environment(threads: int):
+    previous = {name: os.environ.get(name) for name in _THREAD_ENVIRONMENT_VARIABLES}
+    try:
+        for name in _THREAD_ENVIRONMENT_VARIABLES:
+            os.environ[name] = str(threads)
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def run_hybrid_experiment(
@@ -626,7 +831,9 @@ def run_hybrid_experiment(
 ) -> HybridManifest:
     """Validate, resume, and run one final hybrid experiment split."""
     inputs = _validated_inputs(config)
-    selected = _selected_prior_lambda(config)
+    selected = _selected_prior_lambda(config, inputs=inputs)
+    tuning_sha256 = checkpoint_sha256(config.output_dir / "tuning.json")
+    dataset_config = inputs.dataset_config
     jobs = build_hybrid_jobs(config.dataset_dir, split, config.noise_scenarios)
     expected = {job.name: _job_ids(job) for job in jobs}
     split_directory = config.output_dir / split
@@ -638,6 +845,11 @@ def run_hybrid_experiment(
         dataset_manifest_sha256=inputs.dataset_manifest_sha256,
         forward_checkpoint=config.forward_checkpoint,
         supervised_checkpoint_sha256=inputs.supervised.checkpoint_sha256,
+        supervised_seeds=inputs.supervised.seeds,
+        supervised_run_identity_sha256=(
+            inputs.supervised_run_identity_sha256
+        ),
+        tuning_sha256=tuning_sha256,
         config=split_config,
         selected_prior_lambda=selected,
         expected_sample_ids_by_job=expected,
@@ -646,11 +858,17 @@ def run_hybrid_experiment(
         path = split_directory / f"{job.name}.h5"
         if job.name in manifest.completed_jobs:
             validate_hybrid_result_shard(
-                path, manifest=manifest, expected_sample_ids=expected[job.name]
+                path,
+                manifest=manifest,
+                expected_sample_ids=expected[job.name],
+                expected_job=job.name,
             )
         elif path.exists():
             validate_hybrid_result_shard(
-                path, manifest=manifest, expected_sample_ids=expected[job.name]
+                path,
+                manifest=manifest,
+                expected_sample_ids=expected[job.name],
+                expected_job=job.name,
             )
             manifest = mark_hybrid_job_complete(split_directory, job.name, path)
     assigned = assigned_hybrid_jobs(
@@ -668,9 +886,22 @@ def run_hybrid_experiment(
     )
     if workers <= 1:
         for job in pending:
-            run_hybrid_job(job, worker_config, inputs.dataset_config, manifest)
+            _run_hybrid_job_with_predictors(
+                job,
+                worker_config,
+                dataset_config,
+                manifest,
+                inputs.surrogate,
+                inputs.supervised,
+            )
     elif pending:
-        with ProcessPoolExecutor(max_workers=min(workers, len(pending))) as executor:
+        del inputs
+        with _child_thread_environment(config.threads_per_worker), ProcessPoolExecutor(
+            max_workers=min(workers, len(pending)),
+            mp_context=_spawn_context(),
+            initializer=_configure_child_threads,
+            initargs=(config.threads_per_worker,),
+        ) as executor:
             iterator = iter(pending)
             in_flight: set[Future[HybridManifest]] = set()
             for _ in range(min(workers, len(pending))):
@@ -680,7 +911,7 @@ def run_hybrid_experiment(
                         _run_job_process,
                         job,
                         worker_config,
-                        inputs.dataset_config,
+                        dataset_config,
                         manifest,
                     )
                 )
@@ -698,7 +929,7 @@ def run_hybrid_experiment(
                             _run_job_process,
                             job,
                             worker_config,
-                            inputs.dataset_config,
+                            dataset_config,
                             manifest,
                         )
                     )

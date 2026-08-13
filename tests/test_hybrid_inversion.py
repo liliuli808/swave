@@ -28,6 +28,13 @@ class LinearForward(nn.Module):
         return prediction.reshape(values.shape[0], 4, 3)
 
 
+class InactiveZeroForward(LinearForward):
+    def forward(self, values: Tensor) -> Tensor:
+        prediction = super().forward(values).clone()
+        prediction[:, 3, 2] = 0.0
+        return prediction
+
+
 def _linear_surrogate() -> DifferentiableSurrogate:
     return DifferentiableSurrogate(
         model=LinearForward(),
@@ -66,6 +73,23 @@ def test_mean_dimensionless_sensitivity_matches_linear_jacobian_and_mask() -> No
     expected = (dimensionless * cell_weights[:, None]).sum(axis=0) / cell_weights.sum()
 
     np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-12)
+
+
+def test_inactive_zero_prediction_does_not_enter_sensitivity_division() -> None:
+    surrogate = _linear_surrogate()
+    surrogate.model = InactiveZeroForward().to(dtype=torch.float64)
+    mask = np.ones((4, 3), dtype=np.bool_)
+    mask[3, 2] = False
+
+    sensitivity = mean_dimensionless_sensitivity(
+        surrogate,
+        np.linspace(0.5, 1.5, 20),
+        mask,
+        (4.0, 2.0, 1.0, 1.0),
+    )
+
+    assert np.all(np.isfinite(sensitivity))
+    assert np.all(sensitivity > 0)
 
 
 def test_inverse_sensitivity_weights_are_bounded_normalized_and_reversed() -> None:

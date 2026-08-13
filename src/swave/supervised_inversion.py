@@ -25,6 +25,7 @@ from .dataset import (
 )
 from .geology import ModelKind
 from .inference import resolve_device
+from .inversion_results import checkpoint_sha256, sample_id_sha256
 from .splits import SPLIT_POLICY, Split, mask_for_split
 
 DROP_FREQUENCY_COLUMNS = 1
@@ -1125,6 +1126,24 @@ def _split_counts(dataset_dir: Path) -> dict[str, int]:
     return counts
 
 
+def _split_sample_identity(dataset_dir: Path) -> dict[str, dict[str, object]]:
+    populations: dict[str, dict[str, object]] = {}
+    for split in ("test", "inversion"):
+        pieces: list[NDArray[np.uint64]] = []
+        for path in sorted(dataset_dir.glob("shard-*.h5")):
+            with h5py.File(path, "r") as handle:
+                sample_ids = np.asarray(handle["sample_id"], dtype=np.uint64)
+            selected = sample_ids[mask_for_split(sample_ids, split)]
+            if selected.size:
+                pieces.append(selected)
+        values = np.sort(np.concatenate(pieces)).astype(np.uint64, copy=False)
+        populations[split] = {
+            "sample_count": len(values),
+            "sample_id_sha256": sample_id_sha256(values),
+        }
+    return populations
+
+
 def train_supervised(config: SupervisedConfig) -> Path:
     """Train all configured seeds and write one final ensemble evaluation."""
     manifest = validate_dataset_files(config.dataset_dir)
@@ -1190,7 +1209,15 @@ def train_supervised(config: SupervisedConfig) -> Path:
     report = {
         **identity,
         "seeds": list(config.seeds),
+        "supervised_checkpoint_sha256": [
+            checkpoint_sha256(config.output_dir / f"seed-{seed}-best.pt")
+            for seed in config.seeds
+        ],
+        "supervised_run_identity_sha256": checkpoint_sha256(
+            config.output_dir / "run-identity.json"
+        ),
         "splits": _split_counts(config.dataset_dir),
+        "split_sample_identity": _split_sample_identity(config.dataset_dir),
         "validation": {
             "sample_count": len(validation_truth),
             "per_seed_mae_km_s": {

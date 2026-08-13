@@ -22,6 +22,7 @@ from .geology import ModelKind
 from .inversion_results import (
     ResultBatch,
     ResultManifest,
+    sample_id_sha256,
     validate_complete_results,
     validate_result_shard,
 )
@@ -1464,6 +1465,19 @@ def build_inversion_report(
         ),
         "population_figure_scope": population_scope,
         "experiment_scopes": summaries,
+        "comparison_populations": {
+            "inversion": {
+                "sample_count": len(np.unique(rows_by_scope["full"].sample_id)),
+                "sample_id_sha256": sample_id_sha256(
+                    np.asarray(
+                        np.unique(rows_by_scope["full"].sample_id),
+                        dtype=np.uint64,
+                    )
+                ),
+            }
+        }
+        if "full" in rows_by_scope
+        else {},
         "representatives": representatives,
         "figures": sorted(figures),
     }
