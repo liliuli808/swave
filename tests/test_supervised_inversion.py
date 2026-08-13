@@ -10,10 +10,13 @@ import numpy as np
 import pytest
 import torch
 
+import swave.supervised_inversion as supervised_module
 from swave.splits import SPLIT_POLICY
 from swave.supervised_inversion import (
+    EpochShuffleSampler,
     InverseNet,
     SupervisedConfig,
+    SupervisedHDF5BatchDataset,
     SupervisedHDF5Dataset,
     compute_supervised_normalization,
     train_supervised,
@@ -107,6 +110,67 @@ def test_supervised_rows_obey_four_way_policy(four_split_dataset: Path) -> None:
     ) == 10
 
 
+def test_supervised_batches_are_contiguous_bounded_and_complete(
+    four_split_dataset: Path,
+) -> None:
+    stats = compute_supervised_normalization(four_split_dataset)
+    dataset = SupervisedHDF5BatchDataset(
+        four_split_dataset,
+        "train",
+        stats,
+        batch_size=16,
+    )
+
+    batches = [dataset[index] for index in range(len(dataset))]
+    sample_ids = np.concatenate([batch[2].numpy() for batch in batches])
+
+    assert np.array_equal(np.sort(sample_ids), np.arange(80))
+    assert max(len(batch[0]) for batch in batches) <= 16
+    assert all(
+        start < stop
+        for _, spans in dataset.entries
+        for start, stop in spans
+    )
+
+
+def test_epoch_sampler_is_history_independent() -> None:
+    sampler = EpochShuffleSampler(size=12, seed=7)
+    sampler.set_epoch(3)
+    expected = list(sampler)
+    sampler.set_epoch(1)
+    list(sampler)
+    sampler.set_epoch(3)
+
+    assert list(sampler) == expected
+    assert sorted(expected) == list(range(12))
+
+
+def test_production_shard_becomes_one_contiguous_training_batch(
+    four_split_dataset: Path,
+    tmp_path: Path,
+) -> None:
+    stats = compute_supervised_normalization(four_split_dataset)
+    directory = tmp_path / "production-shaped"
+    directory.mkdir()
+    path = directory / "shard-00000.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("sample_id", data=np.arange(10_000, dtype=np.uint64))
+
+    dataset = SupervisedHDF5BatchDataset(
+        directory,
+        "train",
+        stats,
+        batch_size=8192,
+    )
+
+    assert len(dataset.entries) == 1
+    entry_path, spans = dataset.entries[0]
+    assert entry_path == path
+    assert len(spans) == 100
+    assert sum(stop - start for start, stop in spans) == 8000
+    assert all(stop - start == 80 for start, stop in spans)
+
+
 def test_normalization_uses_train_rows_only(
     four_split_dataset: Path,
 ) -> None:
@@ -146,6 +210,7 @@ def test_tiny_training_binds_identity_and_evaluates_final_holdouts(
         seeds=(0,),
         width=8,
         blocks=1,
+        dropout=0.2,
         batch_size=16,
         epochs=1,
         patience=1,
@@ -190,6 +255,7 @@ def test_resume_rejects_changed_training_hyperparameters(
         seeds=(0,),
         width=8,
         blocks=1,
+        dropout=0.2,
         batch_size=16,
         epochs=1,
         patience=1,
@@ -203,3 +269,175 @@ def test_resume_rejects_changed_training_hyperparameters(
 
     with pytest.raises(ValueError, match="training configuration"):
         train_supervised(replace(config, learning_rate=2e-3))
+
+
+def test_resume_rejects_changed_seed_ensemble(
+    four_split_dataset: Path,
+    tmp_path: Path,
+) -> None:
+    config = SupervisedConfig(
+        dataset_dir=four_split_dataset,
+        output_dir=tmp_path / "run",
+        seeds=(0,),
+        width=8,
+        blocks=1,
+        batch_size=16,
+        epochs=1,
+        patience=1,
+        num_workers=0,
+        device="cpu",
+    )
+    train_supervised(config)
+
+    with pytest.raises(ValueError, match="training configuration"):
+        train_supervised(replace(config, seeds=(1,)))
+
+
+def test_terminal_early_stop_is_idempotent(
+    four_split_dataset: Path,
+    tmp_path: Path,
+) -> None:
+    config = SupervisedConfig(
+        dataset_dir=four_split_dataset,
+        output_dir=tmp_path / "run",
+        seeds=(0,),
+        width=8,
+        blocks=1,
+        batch_size=16,
+        epochs=2,
+        patience=1,
+        num_workers=0,
+        device="cpu",
+    )
+    train_supervised(config)
+    last_path = config.output_dir / "seed-0-last.pt"
+    payload = torch.load(last_path, map_location="cpu", weights_only=False)
+    payload["epoch"] = 0
+    payload["bad_epochs"] = config.patience
+    torch.save(payload, last_path)
+
+    train_supervised(config)
+
+    resumed = torch.load(last_path, map_location="cpu", weights_only=False)
+    assert resumed["epoch"] == 0
+    assert resumed["bad_epochs"] == config.patience
+
+
+@pytest.mark.parametrize("failure_boundary", ["best", "history"])
+def test_last_checkpoint_is_written_only_after_epoch_artifacts(
+    four_split_dataset: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_boundary: str,
+) -> None:
+    config = SupervisedConfig(
+        dataset_dir=four_split_dataset,
+        output_dir=tmp_path / "run",
+        seeds=(0,),
+        width=8,
+        blocks=1,
+        batch_size=16,
+        epochs=1,
+        patience=1,
+        num_workers=0,
+        device="cpu",
+    )
+    if failure_boundary == "best":
+        original = supervised_module._atomic_torch_save
+
+        def fail_before_best(path: Path, payload: dict[str, object]) -> None:
+            if path.name == "seed-0-best.pt":
+                raise RuntimeError("best boundary")
+            original(path, payload)
+
+        monkeypatch.setattr(
+            supervised_module,
+            "_atomic_torch_save",
+            fail_before_best,
+        )
+    else:
+        original_json = supervised_module._atomic_json_save
+
+        def fail_before_history(path: Path, payload: dict[str, object]) -> None:
+            if path.name == "seed-0-history.json":
+                raise RuntimeError("history boundary")
+            original_json(path, payload)
+
+        monkeypatch.setattr(
+            supervised_module,
+            "_atomic_json_save",
+            fail_before_history,
+        )
+
+    with pytest.raises(RuntimeError, match=failure_boundary):
+        train_supervised(config)
+
+    assert not (config.output_dir / "seed-0-last.pt").exists()
+
+
+def test_interrupted_resume_matches_uninterrupted_training(
+    four_split_dataset: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    common = {
+        "dataset_dir": four_split_dataset,
+        "seeds": (0,),
+        "width": 8,
+        "blocks": 1,
+        "dropout": 0.2,
+        "batch_size": 16,
+        "epochs": 2,
+        "patience": 2,
+        "num_workers": 0,
+        "device": "cpu",
+    }
+    interrupted = SupervisedConfig(
+        output_dir=tmp_path / "interrupted",
+        **common,
+    )
+    original_json_save = supervised_module._atomic_json_save
+    raised = False
+
+    def interrupt_after_first_history(
+        path: Path, payload: dict[str, object]
+    ) -> None:
+        nonlocal raised
+        original_json_save(path, payload)
+        if not raised and path.name == "seed-0-history.json":
+            raised = True
+            raise RuntimeError("simulated interruption")
+
+    monkeypatch.setattr(
+        supervised_module,
+        "_atomic_json_save",
+        interrupt_after_first_history,
+    )
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        train_supervised(interrupted)
+    monkeypatch.setattr(
+        supervised_module,
+        "_atomic_json_save",
+        original_json_save,
+    )
+
+    train_supervised(interrupted)
+    uninterrupted = replace(
+        interrupted,
+        output_dir=tmp_path / "uninterrupted",
+    )
+    train_supervised(uninterrupted)
+
+    resumed_payload = torch.load(
+        interrupted.output_dir / "seed-0-last.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    continuous_payload = torch.load(
+        uninterrupted.output_dir / "seed-0-last.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert resumed_payload["history"] == continuous_payload["history"]
+    for name, value in resumed_payload["model"].items():
+        assert torch.equal(value, continuous_payload["model"][name]), name

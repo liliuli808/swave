@@ -154,7 +154,7 @@ class SupervisedConfig:
 
 - [ ] **Step 4: Implement train-only streaming statistics and row loading**
 
-Read HDF5 in shard batches. Drop only frequency column zero, calculate fill, input mean/std, and target mean/std from `mask_for_split(ids, "train")`, and make `SupervisedHDF5Dataset` fill and normalize each row without materializing the million-row dataset on GPU.
+Read HDF5 in split-exact contiguous spans grouped into logical batches. Drop only frequency column zero, calculate fill, input mean/std, and target mean/std from `mask_for_split(ids, "train")`, and fill/normalize each logical batch without materializing the million-row dataset on GPU or randomly decompressing the same gzip chunks row by row.
 
 - [ ] **Step 5: Run focused tests**
 
@@ -204,7 +204,7 @@ Expected: new training and evaluation tests fail while Task 2 tests stay green.
 
 - [ ] **Step 3: Implement atomic last/best checkpoints and JSON histories**
 
-Each seed uses `seed-{seed}-last.pt`, `seed-{seed}-best.pt`, and `seed-{seed}-history.json`. Checkpoints include model and optimizer state, epoch, best validation physical MAE, normalization arrays, model/training config, split policy, dataset identities, and ordered train-ID SHA-256. Resume rejects any mismatch.
+Each run first writes `run-identity.json`; each seed uses `seed-{seed}-last.pt`, `seed-{seed}-best.pt`, and `seed-{seed}-history.json`. Checkpoints include the ordered seed ensemble, model and optimizer state, epoch, best validation physical MAE, normalization arrays, model/training config, split policy, dataset identities, and ordered train-ID SHA-256. Resume rejects any mismatch, derives epoch randomness from seed plus epoch, and treats a patience-stopped seed as terminal.
 
 - [ ] **Step 4: Implement validation-only selection and final ensemble evaluation**
 

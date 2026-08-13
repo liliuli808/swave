@@ -146,11 +146,17 @@ swave train-inverse \
   --device cuda
 ```
 
-The workflow streams HDF5 rows instead of placing the million-row dataset on
-the GPU. It writes atomic `seed-<N>-last.pt` and `seed-<N>-best.pt` checkpoints,
-per-seed histories, and `evaluation.json`. Every checkpoint binds the dataset
-manifest digest, dataset configuration hash, split policy, and ordered training
-ID digest. Repeating the same command resumes only an identity-compatible run.
+The workflow reads split rows as gzip-chunk-friendly contiguous HDF5 spans,
+shuffles logical batches deterministically by seed and epoch, and never places
+the million-row dataset on the GPU at once. It writes `run-identity.json`, atomic
+`seed-<N>-last.pt` and `seed-<N>-best.pt` checkpoints, per-seed histories, and
+`evaluation.json`. Every run and checkpoint binds the ordered seed ensemble,
+dataset manifest digest, dataset configuration hash, split policy, and ordered
+training-ID digest. Repeating the same command resumes only an
+identity-compatible run; an interrupted run resumes with the same epoch-level
+randomness and an already early-stopped seed remains terminal. Each epoch
+publishes `seed-<N>-last.pt` only after its best checkpoint (when improved) and
+history are durable, so `last.pt` is the epoch commit marker.
 
 The 476-value input is formed from four modes and 119 frequencies after
 dropping the 0.5 Hz column. Invalid higher-mode cells use train-only

@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from numpy.typing import NDArray
 from torch import Tensor, nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .dataset import (
     dataset_manifest_sha256,
@@ -339,6 +339,159 @@ class SupervisedHDF5Dataset(
         self.close()
 
 
+class SupervisedHDF5BatchDataset(
+    Dataset[tuple[Tensor, Tensor, Tensor, Tensor]]
+):
+    """Read contiguous HDF5 spans and return one preprocessed tensor batch."""
+
+    def __init__(
+        self,
+        dataset_dir: Path | str,
+        split: Split,
+        normalization: SupervisedNormalization,
+        *,
+        batch_size: int,
+    ) -> None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        self.dataset_dir = Path(dataset_dir)
+        self.split = split
+        self.normalization = normalization
+        self.entries: list[tuple[Path, tuple[tuple[int, int], ...]]] = []
+        self._handles: dict[Path, h5py.File] = {}
+        for path in sorted(self.dataset_dir.glob("shard-*.h5")):
+            with h5py.File(path, "r") as handle:
+                sample_ids = np.asarray(handle["sample_id"], dtype=np.uint64)
+            selected_rows = np.flatnonzero(mask_for_split(sample_ids, split))
+            if not len(selected_rows):
+                continue
+            breaks = np.flatnonzero(np.diff(selected_rows) > 1) + 1
+            runs = np.split(selected_rows, breaks)
+            spans: list[tuple[int, int]] = []
+            count = 0
+            for run in runs:
+                position = int(run[0])
+                run_stop = int(run[-1]) + 1
+                while position < run_stop:
+                    take = min(batch_size - count, run_stop - position)
+                    spans.append((position, position + take))
+                    position += take
+                    count += take
+                    if count == batch_size:
+                        self.entries.append((path, tuple(spans)))
+                        spans = []
+                        count = 0
+            if spans:
+                self.entries.append((path, tuple(spans)))
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def _handle(self, path: Path) -> h5py.File:
+        if path not in self._handles:
+            self._handles[path] = h5py.File(path, "r")
+        return self._handles[path]
+
+    def __getitem__(
+        self, index: int
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        path, spans = self.entries[index]
+        handle = self._handle(path)
+        sample_ids = np.concatenate(
+            [
+                np.asarray(handle["sample_id"][start:stop], dtype=np.int64)
+                for start, stop in spans
+            ]
+        )
+        phase = np.concatenate(
+            [
+                np.asarray(
+                    handle["phase_velocity"][
+                        start:stop, :, DROP_FREQUENCY_COLUMNS:
+                    ],
+                    dtype=np.float32,
+                )
+                for start, stop in spans
+            ]
+        )
+        valid = np.concatenate(
+            [
+                np.asarray(
+                    handle["valid_mask"][
+                        start:stop, :, DROP_FREQUENCY_COLUMNS:
+                    ],
+                    dtype=np.bool_,
+                )
+                for start, stop in spans
+            ]
+        )
+        target = np.concatenate(
+            [
+                np.asarray(handle["vs"][start:stop], dtype=np.float32)
+                for start, stop in spans
+            ]
+        )
+        kinds = np.concatenate(
+            [
+                np.asarray(handle["model_kind"][start:stop], dtype=np.int64)
+                for start, stop in spans
+            ]
+        )
+        filled = np.where(valid, phase, self.normalization.fill_values).reshape(
+            len(target), -1
+        )
+        normalized_input = (
+            filled - self.normalization.input_mean
+        ) / self.normalization.input_std
+        normalized_target = (
+            target - self.normalization.target_mean
+        ) / self.normalization.target_std
+        return (
+            torch.from_numpy(normalized_input.astype(np.float32, copy=False)),
+            torch.from_numpy(normalized_target.astype(np.float32, copy=False)),
+            torch.from_numpy(sample_ids),
+            torch.from_numpy(kinds),
+        )
+
+    def __getstate__(self) -> dict[str, object]:
+        state = self.__dict__.copy()
+        state["_handles"] = {}
+        return state
+
+    def close(self) -> None:
+        for handle in self._handles.values():
+            handle.close()
+        self._handles.clear()
+
+    def __del__(self) -> None:
+        self.close()
+
+
+class EpochShuffleSampler(Sampler[int]):
+    """Deterministically shuffle batch indexes from only seed and epoch."""
+
+    def __init__(self, *, size: int, seed: int) -> None:
+        if size < 0 or seed < 0:
+            raise ValueError("size and seed must be nonnegative")
+        self.size = size
+        self.seed = seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        if epoch < 0:
+            raise ValueError("epoch must be nonnegative")
+        self.epoch = epoch
+
+    def __iter__(self):
+        generator = torch.Generator().manual_seed(
+            _derived_seed(self.seed, self.epoch, "batch-order")
+        )
+        return iter(torch.randperm(self.size, generator=generator).tolist())
+
+    def __len__(self) -> int:
+        return self.size
+
+
 def _atomic_torch_save(path: Path, payload: dict[str, object]) -> None:
     temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}")
     torch.save(payload, temporary)
@@ -374,6 +527,7 @@ def _checkpoint_identity(
     manifest_sha256: str,
 ) -> dict[str, object]:
     training_identity = {
+        "seeds": list(config.seeds),
         "width": config.width,
         "blocks": config.blocks,
         "dropout": config.dropout,
@@ -399,6 +553,9 @@ def _checkpoint_identity(
         "train_sample_count": normalization.train_sample_count,
         "train_sample_id_sha256": normalization.train_sample_id_sha256,
         "training_configuration_sha256": training_configuration_sha256,
+        "seed_ensemble": list(config.seeds),
+        "epoch_randomness": "sha256-derived-from-seed-and-epoch-v1",
+        "batch_order": "contiguous-hdf5-spans-epoch-shuffled-v1",
         "model_config": {
             "input_dim": INPUT_DIMENSION,
             "output_dim": OUTPUT_DIMENSION,
@@ -445,6 +602,12 @@ def _physical_validation_mae(
     return absolute_sum / count
 
 
+def _loader_worker_options(num_workers: int) -> dict[str, object]:
+    if num_workers == 0:
+        return {}
+    return {"persistent_workers": True, "prefetch_factor": 1}
+
+
 def _checkpoint_payload(
     *,
     model: InverseNet,
@@ -474,9 +637,14 @@ def _checkpoint_payload(
     }
 
 
+def _derived_seed(seed: int, epoch: int, purpose: str) -> int:
+    digest = hashlib.sha256(f"{seed}:{epoch}:{purpose}".encode()).digest()
+    return int.from_bytes(digest[:8], "little") % (2**63 - 1)
+
+
 def _seed_everything(seed: int) -> None:
     random.seed(seed)
-    np.random.seed(seed)
+    np.random.seed(seed % 2**32)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -503,30 +671,6 @@ def _train_seed(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=config.epochs
     )
-    train_dataset = SupervisedHDF5Dataset(
-        config.dataset_dir, "train", normalization
-    )
-    validation_dataset = SupervisedHDF5Dataset(
-        config.dataset_dir, "validation", normalization
-    )
-    if not train_dataset or not validation_dataset:
-        raise ValueError("train and validation splits must be nonempty")
-    generator = torch.Generator().manual_seed(seed)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
-        pin_memory=device.type == "cuda",
-        generator=generator,
-    )
-    validation_loader = DataLoader(
-        validation_dataset,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=config.num_workers,
-        pin_memory=device.type == "cuda",
-    )
     loss_function = nn.HuberLoss(delta=1.0)
     best_path = config.output_dir / f"seed-{seed}-best.pt"
     last_path = config.output_dir / f"seed-{seed}-last.pt"
@@ -547,8 +691,49 @@ def _train_seed(
         best_validation_mae = float(payload["best_validation_mae_km_s"])
         bad_epochs = int(payload["bad_epochs"])
         history = list(payload["history"])
+        if bad_epochs >= config.patience:
+            if not best_path.exists():
+                raise ValueError("terminal supervised run has no best checkpoint")
+            return best_path
 
+    train_dataset = SupervisedHDF5BatchDataset(
+        config.dataset_dir,
+        "train",
+        normalization,
+        batch_size=config.batch_size,
+    )
+    validation_dataset = SupervisedHDF5BatchDataset(
+        config.dataset_dir,
+        "validation",
+        normalization,
+        batch_size=config.batch_size,
+    )
+    if not train_dataset or not validation_dataset:
+        raise ValueError("train and validation splits must be nonempty")
+    train_sampler = EpochShuffleSampler(size=len(train_dataset), seed=seed)
+    loader_generator = torch.Generator().manual_seed(
+        _derived_seed(seed, 0, "data-loader-workers")
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=None,
+        sampler=train_sampler,
+        num_workers=config.num_workers,
+        pin_memory=device.type == "cuda",
+        generator=loader_generator,
+        **_loader_worker_options(config.num_workers),
+    )
+    validation_loader = DataLoader(
+        validation_dataset,
+        batch_size=None,
+        shuffle=False,
+        num_workers=config.num_workers,
+        pin_memory=device.type == "cuda",
+        **_loader_worker_options(config.num_workers),
+    )
     for epoch in range(start_epoch, config.epochs):
+        _seed_everything(_derived_seed(seed, epoch, "training"))
+        train_sampler.set_epoch(epoch)
         model.train()
         training_loss_sum = 0.0
         training_rows = 0
@@ -597,12 +782,27 @@ def _train_seed(
             identity=identity,
             seed=seed,
         )
-        _atomic_torch_save(last_path, payload)
         if improved:
             _atomic_torch_save(best_path, payload)
         _atomic_json_save(
             history_path,
             {"seed": seed, "epochs": history},
+        )
+        # Publish the resumable checkpoint last: its presence commits the
+        # epoch only after every artifact needed to describe it is durable.
+        _atomic_torch_save(last_path, payload)
+        print(
+            json.dumps(
+                {
+                    "event": "supervised_epoch",
+                    "seed": seed,
+                    **history[-1],
+                    "best_validation_mae_km_s": best_validation_mae,
+                    "bad_epochs": bad_epochs,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
         )
         if bad_epochs >= config.patience:
             break
@@ -634,13 +834,19 @@ def _collect_predictions(
     num_workers: int,
     device: torch.device,
 ) -> tuple[NDArray[np.float32], list[NDArray[np.float32]], NDArray[np.int64]]:
-    dataset = SupervisedHDF5Dataset(dataset_dir, split, normalization)
+    dataset = SupervisedHDF5BatchDataset(
+        dataset_dir,
+        split,
+        normalization,
+        batch_size=batch_size,
+    )
     loader = DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=None,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=device.type == "cuda",
+        **_loader_worker_options(num_workers),
     )
     target_mean = torch.as_tensor(normalization.target_mean, device=device)
     target_std = torch.as_tensor(normalization.target_std, device=device)
@@ -757,6 +963,18 @@ def train_supervised(config: SupervisedConfig) -> Path:
     )
     device = resolve_device(config.device)
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    run_identity_path = config.output_dir / "run-identity.json"
+    if run_identity_path.exists():
+        with run_identity_path.open(encoding="utf-8") as handle:
+            stored_identity = json.load(handle)
+        _validate_checkpoint_identity(stored_identity, identity)
+    else:
+        existing_outputs = list(config.output_dir.glob("seed-*-*.pt"))
+        if existing_outputs or (config.output_dir / "evaluation.json").exists():
+            raise ValueError(
+                "supervised output exists without a run training configuration"
+            )
+        _atomic_json_save(run_identity_path, identity)
     best_paths = [
         _train_seed(config, seed, normalization, identity, device)
         for seed in config.seeds
