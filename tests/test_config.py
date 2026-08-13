@@ -6,11 +6,14 @@ import pytest
 from swave.config import (
     DatasetConfig,
     GeologyConfig,
+    HybridInversionConfig,
     InversionConfig,
     PhysicsConfig,
     canonical_hash,
+    hybrid_inversion_identity_hash,
     inversion_identity_hash,
     load_dataset_config,
+    load_hybrid_inversion_config,
     load_inversion_config,
 )
 
@@ -106,3 +109,70 @@ def test_inversion_scientific_hash_excludes_new_operational_controls() -> None:
         task_count=4,
     )
     assert inversion_identity_hash(operational) == inversion_identity_hash(base)
+
+
+def test_hybrid_defaults_encode_inverse_sensitivity_experiment() -> None:
+    config = HybridInversionConfig()
+
+    assert config.prior_lambda_candidates == (1e-4, 1e-3, 1e-2, 1e-1, 1.0)
+    assert config.sensitivity_epsilon_fraction == pytest.approx(1e-2)
+    assert config.prior_weight_min == pytest.approx(0.25)
+    assert config.prior_weight_max == pytest.approx(4.0)
+    assert config.validation_samples_per_kind == 100
+    assert config.mode_weights == (4.0, 1.0, 1.0, 1.0)
+    assert config.smoothness_lambda == pytest.approx(1e-2)
+    assert (config.vs_min, config.vs_max) == pytest.approx((0.3, 2.6))
+
+
+def test_loads_hybrid_toml_and_rejects_unknown_keys(tmp_path: Path) -> None:
+    loaded = load_hybrid_inversion_config(Path("configs/hybrid-inversion.toml"))
+    assert loaded.supervised_dir == Path("runs/supervised-inversion-v2")
+    assert loaded.output_dir == Path("results/hybrid-inversion")
+
+    path = tmp_path / "bad-hybrid.toml"
+    path.write_text("[hybrid]\nmisspelled = 1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown hybrid keys"):
+        load_hybrid_inversion_config(path)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"prior_lambda_candidates": (0.1, 0.01)}, "increasing"),
+        ({"prior_lambda_candidates": (0.0, 0.1)}, "positive"),
+        ({"sensitivity_epsilon_fraction": 0.0}, "epsilon"),
+        ({"prior_weight_min": 1.1}, "weight bounds"),
+        ({"prior_weight_max": 0.9}, "weight bounds"),
+        ({"validation_samples_per_kind": 0}, "validation_samples_per_kind"),
+        ({"noise_scenarios": ("clean", "clean")}, "unique"),
+        ({"task_index": 2, "task_count": 2}, "task_index"),
+        ({"workers": False}, "workers"),
+    ],
+)
+def test_hybrid_config_rejects_noncanonical_values(
+    changes: dict[str, object], message: str
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        HybridInversionConfig(**changes)
+
+
+def test_hybrid_identity_hash_excludes_only_execution_controls() -> None:
+    base = HybridInversionConfig()
+    operational = dataclasses.replace(
+        base,
+        device="cpu",
+        workers=3,
+        threads_per_worker=2,
+        task_index=2,
+        task_count=4,
+    )
+    scientific = dataclasses.replace(
+        base, prior_lambda_candidates=(1e-3, 1e-2, 1e-1)
+    )
+
+    assert hybrid_inversion_identity_hash(operational) == (
+        hybrid_inversion_identity_hash(base)
+    )
+    assert hybrid_inversion_identity_hash(scientific) != (
+        hybrid_inversion_identity_hash(base)
+    )

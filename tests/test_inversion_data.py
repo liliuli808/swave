@@ -8,8 +8,10 @@ from swave.dataset import validate_dataset_files
 from swave.inference import ForwardPredictor
 from swave.inversion_data import (
     iter_inversion_samples,
+    iter_observation_samples,
     samples_by_source_shard,
     select_deep_samples,
+    select_observation_samples_by_kind,
 )
 from swave.splits import SPLIT_POLICY
 
@@ -39,6 +41,37 @@ def test_optimizer_samples_exclude_true_vs(tiny_complete_dataset: Path) -> None:
         not hasattr(row, "vs") and not hasattr(row, "true_vs") for row in rows
     )
     assert all(row.phase_velocity.shape == (4, 120) for row in rows)
+
+
+def test_observation_reader_supports_disjoint_final_splits_without_truth(
+    tiny_complete_dataset: Path,
+) -> None:
+    test_rows = list(iter_observation_samples(tiny_complete_dataset, "test"))
+    inversion_rows = list(
+        iter_observation_samples(tiny_complete_dataset, "inversion")
+    )
+
+    assert [row.sample_id for row in test_rows] == [89]
+    assert [row.sample_id for row in inversion_rows] == [90, 91, 92, 93]
+    assert {row.sample_id for row in test_rows}.isdisjoint(
+        row.sample_id for row in inversion_rows
+    )
+    assert all(not hasattr(row, "vs") for row in test_rows + inversion_rows)
+
+
+def test_split_selection_is_smallest_id_per_family(
+    tiny_complete_dataset: Path,
+) -> None:
+    selected = select_observation_samples_by_kind(
+        tiny_complete_dataset, "inversion", per_kind=1
+    )
+
+    assert [(row.model_kind, row.sample_id) for row in selected] == [
+        (0, 90),
+        (1, 91),
+        (2, 92),
+        (3, 93),
+    ]
 
 
 def test_deep_selection_is_smallest_id_per_family(

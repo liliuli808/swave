@@ -12,7 +12,7 @@ from numpy.typing import NDArray
 
 from .dataset import validate_dataset_files
 from .geology import ModelKind
-from .splits import mask_for_split
+from .splits import Split, mask_for_split
 
 
 @dataclass(frozen=True)
@@ -28,16 +28,16 @@ class InversionSample:
     source_row: int
 
 
-def iter_inversion_samples(
-    dataset_dir: Path | str,
+def iter_observation_samples(
+    dataset_dir: Path | str, split: Split
 ) -> Iterator[InversionSample]:
-    """Yield validated inversion rows without exposing their target Vs profiles."""
+    """Yield one validated split without exposing target Vs profiles."""
     directory = Path(dataset_dir)
     validate_dataset_files(directory)
     for path in sorted(directory.glob("shard-*.h5")):
         with h5py.File(path, "r") as handle:
             sample_ids = np.asarray(handle["sample_id"], dtype=np.uint64)
-            rows = np.flatnonzero(mask_for_split(sample_ids, "inversion"))
+            rows = np.flatnonzero(mask_for_split(sample_ids, split))
             shard_id = int(handle.attrs["shard_id"])
             for row in rows:
                 yield InversionSample(
@@ -51,6 +51,13 @@ def iter_inversion_samples(
                     source_shard_id=shard_id,
                     source_row=int(row),
                 )
+
+
+def iter_inversion_samples(
+    dataset_dir: Path | str,
+) -> Iterator[InversionSample]:
+    """Yield validated inversion rows without exposing their target Vs profiles."""
+    yield from iter_observation_samples(dataset_dir, "inversion")
 
 
 def samples_by_source_shard(
@@ -69,13 +76,20 @@ def select_deep_samples(
     dataset_dir: Path | str, per_kind: int
 ) -> list[InversionSample]:
     """Select the lowest-ID inversion samples from every model family."""
+    return select_observation_samples_by_kind(dataset_dir, "inversion", per_kind)
+
+
+def select_observation_samples_by_kind(
+    dataset_dir: Path | str, split: Split, per_kind: int
+) -> list[InversionSample]:
+    """Select the lowest-ID observation-only rows per family from one split."""
     if per_kind <= 0:
         raise ValueError("per_kind must be positive")
 
     samples_by_kind: dict[ModelKind, list[InversionSample]] = {
         kind: [] for kind in ModelKind
     }
-    for sample in iter_inversion_samples(dataset_dir):
+    for sample in iter_observation_samples(dataset_dir, split):
         samples_by_kind[ModelKind(sample.model_kind)].append(sample)
 
     deficient: list[str] = []
@@ -87,7 +101,7 @@ def select_deep_samples(
         selected.extend(samples[:per_kind])
     if deficient:
         raise ValueError(
-            "insufficient inversion samples for model families: "
+            f"insufficient {split} samples for model families: "
             + ", ".join(deficient)
         )
     return selected

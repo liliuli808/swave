@@ -9,6 +9,7 @@ import math
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal
 
@@ -324,6 +325,165 @@ class InversionConfig:
         return _plain(dataclasses.asdict(self))
 
 
+@dataclass(frozen=True)
+class HybridInversionConfig:
+    """Scientific and execution controls for learning-prior inversion."""
+
+    dataset_config: Path = Path("configs/dataset.toml")
+    dataset_dir: Path = Path("data/production")
+    forward_checkpoint: Path = Path("runs/production-48g/best.pt")
+    supervised_dir: Path = Path("runs/supervised-inversion-v2")
+    output_dir: Path = Path("results/hybrid-inversion")
+    mode_weights: tuple[float, float, float, float] = (4.0, 1.0, 1.0, 1.0)
+    smoothness_lambda: float = 1e-2
+    regularization_type: str = "adaptive"
+    prior_lambda_candidates: tuple[float, ...] = (
+        1e-4,
+        1e-3,
+        1e-2,
+        1e-1,
+        1.0,
+    )
+    sensitivity_epsilon_fraction: float = 1e-2
+    sensitivity_phase_floor: float = 1e-12
+    prior_weight_min: float = 0.25
+    prior_weight_max: float = 4.0
+    vs_min: float = 0.3
+    vs_max: float = 2.6
+    reference_width: float = 0.7
+    max_iterations: int = 100
+    relative_tolerance: float = 1e-5
+    validation_samples_per_kind: int = 100
+    noise_scenarios: tuple[NoiseScenario, ...] = ("clean", "noise_1pct")
+    seed: int = 20_260_727
+    device: str = "auto"
+    workers: int = 0
+    threads_per_worker: int = 1
+    task_index: int = 0
+    task_count: int = 1
+
+    def __post_init__(self) -> None:
+        for name in (
+            "dataset_config",
+            "dataset_dir",
+            "forward_checkpoint",
+            "supervised_dir",
+            "output_dir",
+        ):
+            object.__setattr__(self, name, Path(getattr(self, name)))
+        object.__setattr__(
+            self, "mode_weights", tuple(float(value) for value in self.mode_weights)
+        )
+        object.__setattr__(
+            self,
+            "prior_lambda_candidates",
+            tuple(float(value) for value in self.prior_lambda_candidates),
+        )
+        object.__setattr__(self, "noise_scenarios", tuple(self.noise_scenarios))
+        if len(self.mode_weights) != 4 or any(
+            not math.isfinite(value) or value < 0 for value in self.mode_weights
+        ):
+            raise ValueError("mode_weights must contain four finite nonnegative values")
+        if not any(self.mode_weights):
+            raise ValueError("at least one mode weight must be positive")
+        candidates = self.prior_lambda_candidates
+        if not candidates or any(
+            not math.isfinite(value) or value <= 0 for value in candidates
+        ):
+            raise ValueError("prior_lambda_candidates must be finite and positive")
+        if any(left >= right for left, right in pairwise(candidates)):
+            raise ValueError("prior_lambda_candidates must be strictly increasing")
+        positive_floats = {
+            "sensitivity_epsilon_fraction": self.sensitivity_epsilon_fraction,
+            "sensitivity_phase_floor": self.sensitivity_phase_floor,
+            "reference_width": self.reference_width,
+        }
+        for name, value in positive_floats.items():
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be finite and positive")
+        if (
+            not math.isfinite(self.smoothness_lambda)
+            or self.smoothness_lambda < 0
+        ):
+            raise ValueError("smoothness_lambda must be finite and nonnegative")
+        if self.regularization_type not in {"adaptive", "first_order"}:
+            raise ValueError("regularization_type must be adaptive or first_order")
+        if (
+            not math.isfinite(self.prior_weight_min)
+            or not math.isfinite(self.prior_weight_max)
+            or not 0 < self.prior_weight_min <= 1 <= self.prior_weight_max
+        ):
+            raise ValueError("prior weight bounds must contain one and be positive")
+        if not 0.3 <= self.vs_min < self.vs_max <= 2.6:
+            raise ValueError("Vs bounds must stay within the supported [0.3, 2.6]")
+        if self.reference_width > self.vs_max - self.vs_min:
+            raise ValueError("reference_width is wider than the Vs range")
+        integer_fields = (
+            "max_iterations",
+            "validation_samples_per_kind",
+            "seed",
+            "workers",
+            "threads_per_worker",
+            "task_index",
+            "task_count",
+        )
+        for name in integer_fields:
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+        if self.max_iterations <= 0:
+            raise ValueError("max_iterations must be positive")
+        if self.validation_samples_per_kind <= 0:
+            raise ValueError("validation_samples_per_kind must be positive")
+        if self.seed < 0:
+            raise ValueError("seed must be nonnegative")
+        if self.workers < 0:
+            raise ValueError("workers must be nonnegative")
+        if self.threads_per_worker <= 0:
+            raise ValueError("threads_per_worker must be positive")
+        if self.task_count <= 0 or not 0 <= self.task_index < self.task_count:
+            raise ValueError("task_index must be in [0, task_count)")
+        if (
+            isinstance(self.relative_tolerance, bool)
+            or not isinstance(self.relative_tolerance, (int, float))
+            or not math.isfinite(float(self.relative_tolerance))
+            or not 0 < self.relative_tolerance < 1
+        ):
+            raise ValueError("relative_tolerance must be finite and in (0, 1)")
+        if (
+            not self.noise_scenarios
+            or len(set(self.noise_scenarios)) != len(self.noise_scenarios)
+        ):
+            raise ValueError("noise_scenarios must be nonempty and unique")
+        if any(
+            scenario not in {"clean", "noise_1pct"}
+            for scenario in self.noise_scenarios
+        ):
+            raise ValueError("noise_scenarios contain an unsupported value")
+        if self.device not in {"auto", "cpu", "cuda", "mps"}:
+            raise ValueError("device must be auto, cpu, cuda, or mps")
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> HybridInversionConfig:
+        values = dict(mapping.get("hybrid", mapping))
+        known_keys = {item.name for item in dataclasses.fields(cls)}
+        unknown_keys = set(values) - known_keys
+        if unknown_keys:
+            raise ValueError(f"unknown hybrid keys: {sorted(unknown_keys)}")
+        for name in ("mode_weights", "prior_lambda_candidates", "noise_scenarios"):
+            if name in values:
+                values[name] = tuple(values[name])
+        return cls(**values)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _plain(dataclasses.asdict(self))
+
+
 def _plain(value: Any) -> Any:
     if isinstance(value, Path):
         return value.as_posix()
@@ -334,7 +494,9 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def canonical_hash(config: DatasetConfig | TrainingConfig | InversionConfig) -> str:
+def canonical_hash(
+    config: DatasetConfig | TrainingConfig | InversionConfig | HybridInversionConfig,
+) -> str:
     payload = json.dumps(
         config.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()
@@ -359,6 +521,23 @@ def inversion_identity_hash(config: InversionConfig) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def hybrid_inversion_identity_hash(config: HybridInversionConfig) -> str:
+    """Hash hybrid scientific controls while excluding execution placement."""
+    payload = config.to_dict()
+    for name in (
+        "device",
+        "workers",
+        "threads_per_worker",
+        "task_index",
+        "task_count",
+    ):
+        del payload[name]
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def load_dataset_config(path: Path | str) -> DatasetConfig:
     with Path(path).open("rb") as handle:
         return DatasetConfig.from_mapping(tomllib.load(handle))
@@ -372,3 +551,8 @@ def load_training_config(path: Path | str) -> TrainingConfig:
 def load_inversion_config(path: Path | str) -> InversionConfig:
     with Path(path).open("rb") as handle:
         return InversionConfig.from_mapping(tomllib.load(handle))
+
+
+def load_hybrid_inversion_config(path: Path | str) -> HybridInversionConfig:
+    with Path(path).open("rb") as handle:
+        return HybridInversionConfig.from_mapping(tomllib.load(handle))
