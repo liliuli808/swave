@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -26,22 +27,15 @@ _DIGEST_DTYPE = np.dtype("S32")
 _FLOAT32_ROUNDING_TOLERANCE = 5e-7
 
 
-def summarize_duplicate_digests(
+def _duplicate_digest_groups(
     digests: NDArray[np.bytes_], sample_ids: NDArray[np.uint64]
-) -> dict[str, object]:
-    """Summarize equal fixed-width digests and whether they cross data splits."""
+) -> list[list[int]]:
     values = np.asarray(digests, dtype=_DIGEST_DTYPE)
     ids = np.asarray(sample_ids, dtype=np.uint64)
     if values.ndim != 1 or ids.ndim != 1 or values.shape != ids.shape:
         raise ValueError("digests and sample_ids must be equal one-dimensional arrays")
     if not values.size:
-        return {
-            "duplicate_groups": 0,
-            "duplicate_rows": 0,
-            "extra_duplicate_rows": 0,
-            "cross_split_groups": 0,
-            "examples": [],
-        }
+        return []
 
     order = np.argsort(values, kind="stable")
     ordered = values[order]
@@ -49,16 +43,43 @@ def summarize_duplicate_digests(
     starts = np.r_[0, boundaries]
     stops = np.r_[boundaries, len(ordered)]
     groups: list[list[int]] = []
-    duplicate_rows = 0
-    cross_split_groups = 0
     for start, stop in zip(starts, stops, strict=True):
         if stop - start < 2:
             continue
         group = sorted(int(value) for value in ids[order[start:stop]])
-        duplicate_rows += len(group)
-        if len({split_for_sample_id(value) for value in group}) > 1:
-            cross_split_groups += 1
         groups.append(group)
+    return groups
+
+
+def summarize_duplicate_digests(
+    digests: NDArray[np.bytes_],
+    sample_ids: NDArray[np.uint64],
+    *,
+    raw_rows: Mapping[int, bytes] | None = None,
+) -> dict[str, object]:
+    """Summarize digest candidates, optionally confirming raw-byte equality."""
+    groups = _duplicate_digest_groups(digests, sample_ids)
+    if raw_rows is not None:
+        confirmed: list[list[int]] = []
+        for group in groups:
+            by_payload: dict[bytes, list[int]] = defaultdict(list)
+            for sample_id in group:
+                try:
+                    payload = raw_rows[sample_id]
+                except KeyError as error:
+                    raise ValueError(
+                        f"missing raw bytes for candidate sample {sample_id}"
+                    ) from error
+                by_payload[payload].append(sample_id)
+            confirmed.extend(
+                sorted(values) for values in by_payload.values() if len(values) > 1
+            )
+        groups = sorted(confirmed)
+    duplicate_rows = sum(len(group) for group in groups)
+    cross_split_groups = sum(
+        len({split_for_sample_id(value) for value in group}) > 1
+        for group in groups
+    )
     return {
         "duplicate_groups": len(groups),
         "duplicate_rows": duplicate_rows,
@@ -66,6 +87,57 @@ def summarize_duplicate_digests(
         "cross_split_groups": cross_split_groups,
         "examples": groups[:10],
     }
+
+
+def _candidate_ids(
+    digests: NDArray[np.bytes_], sample_ids: NDArray[np.uint64]
+) -> set[int]:
+    return {
+        sample_id
+        for group in _duplicate_digest_groups(digests, sample_ids)
+        for sample_id in group
+    }
+
+
+def _raw_row_bytes(handle: h5py.File, row: int, names: tuple[str, ...]) -> bytes:
+    return b"".join(
+        np.ascontiguousarray(np.asarray(handle[name][row])).tobytes()
+        for name in names
+    )
+
+
+def _load_candidate_raw_rows(
+    directory: Path,
+    vs_ids: set[int],
+    record_ids: set[int],
+) -> tuple[dict[int, bytes], dict[int, bytes]]:
+    vs_rows: dict[int, bytes] = {}
+    record_rows: dict[int, bytes] = {}
+    wanted = vs_ids | record_ids
+    if not wanted:
+        return vs_rows, record_rows
+    record_names = (
+        "model_kind",
+        "vs",
+        "vp",
+        "density",
+        "phase_velocity",
+        "valid_mask",
+        "quality_flags",
+        "retry_count",
+    )
+    for path in sorted(directory.glob("shard-*.h5")):
+        with h5py.File(path, "r") as handle:
+            sample_ids = np.asarray(handle["sample_id"], dtype=np.uint64)
+            for row, value in enumerate(sample_ids):
+                sample_id = int(value)
+                if sample_id in vs_ids:
+                    vs_rows[sample_id] = _raw_row_bytes(handle, row, ("vs",))
+                if sample_id in record_ids:
+                    record_rows[sample_id] = _raw_row_bytes(
+                        handle, row, record_names
+                    )
+    return vs_rows, record_rows
 
 
 def check_geology_rule(
@@ -254,6 +326,13 @@ def audit_dataset(
     }
     kind_counts = _empty_kind_counts()
     kind_counts.update({key: int(value) for key, value in by_kind.items()})
+    all_vs_digests = np.concatenate(vs_digests)
+    all_record_digests = np.concatenate(record_digests)
+    vs_rows, record_rows = _load_candidate_raw_rows(
+        directory,
+        _candidate_ids(all_vs_digests, ids),
+        _candidate_ids(all_record_digests, ids),
+    )
 
     rule_statistics: dict[str, object] = {}
     for kind in ModelKind:
@@ -291,12 +370,15 @@ def audit_dataset(
             "split_counts": split_counts,
         },
         "duplicates": {
-            "definition": "SHA-256 of fixed-schema raw array bytes",
+            "definition": (
+                "exact fixed-schema raw array byte equality; SHA-256 is used "
+                "only to locate candidates"
+            ),
             "vs": summarize_duplicate_digests(
-                np.concatenate(vs_digests), ids
+                all_vs_digests, ids, raw_rows=vs_rows
             ),
             "full_record": summarize_duplicate_digests(
-                np.concatenate(record_digests), ids
+                all_record_digests, ids, raw_rows=record_rows
             ),
         },
         "geology": {

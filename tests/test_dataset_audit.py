@@ -34,6 +34,25 @@ def test_duplicate_summary_counts_rows_and_cross_split_groups() -> None:
     }
 
 
+def test_duplicate_summary_confirms_raw_bytes_after_digest_match() -> None:
+    digests = np.asarray([b"a" * 32] * 3, dtype="S32")
+    sample_ids = np.asarray([0, 85, 1], dtype=np.uint64)
+
+    summary = summarize_duplicate_digests(
+        digests,
+        sample_ids,
+        raw_rows={0: b"same", 85: b"same", 1: b"collision"},
+    )
+
+    assert summary == {
+        "duplicate_groups": 1,
+        "duplicate_rows": 2,
+        "extra_duplicate_rows": 1,
+        "cross_split_groups": 1,
+        "examples": [[0, 85]],
+    }
+
+
 def test_generated_models_satisfy_declared_family_rules() -> None:
     config = GeologyConfig()
     seen: Counter[ModelKind] = Counter()
