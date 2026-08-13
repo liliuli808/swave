@@ -33,6 +33,7 @@ def test_help_lists_all_workflows(capsys) -> None:
     assert main(["--help"]) == 0
     output = capsys.readouterr().out
     for command in (
+        "audit-dataset",
         "generate",
         "train",
         "evaluate",

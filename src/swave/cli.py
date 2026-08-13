@@ -77,6 +77,16 @@ def _generate(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _audit_dataset(arguments: argparse.Namespace) -> int:
+    from .dataset_audit import audit_dataset, write_audit_report
+
+    config = load_dataset_config(arguments.dataset_config)
+    report = audit_dataset(Path(arguments.dataset_dir), config)
+    output = write_audit_report(arguments.output, report)
+    print(output)
+    return 0
+
+
 def _train(arguments: argparse.Namespace) -> int:
     config = _training_config(arguments.config)
     overrides = {
@@ -240,6 +250,14 @@ def _build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--workers", type=int)
     generate.add_argument("--output-dir")
     generate.set_defaults(handler=_generate)
+
+    audit = subparsers.add_parser(
+        "audit-dataset", help="audit dataset identities, duplicates, and geology"
+    )
+    audit.add_argument("--dataset-config", default="configs/dataset.toml")
+    audit.add_argument("--dataset-dir", required=True)
+    audit.add_argument("--output", required=True)
+    audit.set_defaults(handler=_audit_dataset)
 
     training = subparsers.add_parser(
         "train", help="train or resume the neural surrogate"
