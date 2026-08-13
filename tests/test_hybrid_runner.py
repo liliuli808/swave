@@ -166,6 +166,26 @@ def test_select_prior_lambda_uses_only_validation_samples_and_persists_identity(
     )
 
 
+def test_tuning_reports_missing_supervised_best_before_dataset_work(
+    tmp_path: Path,
+) -> None:
+    supervised = tmp_path / "supervised"
+    supervised.mkdir()
+    (supervised / "run-identity.json").write_text(
+        json.dumps({"seed_ensemble": [0]}), encoding="utf-8"
+    )
+    config = replace(
+        HybridInversionConfig(),
+        supervised_dir=supervised,
+        dataset_dir=tmp_path / "missing-dataset",
+        output_dir=tmp_path / "results",
+        device="cpu",
+    )
+
+    with pytest.raises(ValueError, match="seed-0-best.pt"):
+        select_prior_lambda(config)
+
+
 def test_run_hybrid_job_persists_paired_objective_terms(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

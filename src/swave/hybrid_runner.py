@@ -187,6 +187,9 @@ def _load_predictors(
 def _validated_inputs(config: HybridInversionConfig) -> _HybridInputs:
     if not isinstance(config, HybridInversionConfig):
         raise TypeError("config must be a HybridInversionConfig")
+    supervised = SupervisedEnsemblePredictor.load(
+        config.supervised_dir, config.device
+    )
     dataset_config = load_dataset_config(config.dataset_config)
     manifest = validate_dataset_files(config.dataset_dir)
     dataset_hash = canonical_hash(dataset_config)
@@ -213,7 +216,9 @@ def _validated_inputs(config: HybridInversionConfig) -> _HybridInputs:
         "dataset_manifest_sha256"
     ) != manifest_digest:
         raise ValueError("supervised ensemble dataset identity does not match")
-    surrogate, supervised = _load_predictors(config)
+    surrogate = DifferentiableSurrogate.load(
+        config.forward_checkpoint, config.device
+    )
     return _HybridInputs(
         dataset_config=dataset_config,
         dataset_config_hash=dataset_hash,
