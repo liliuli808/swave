@@ -36,9 +36,6 @@ def four_split_dataset(tmp_path: Path) -> Path:
     valid[1:80, 1, 1] = False
     phase[1:80, 1, 1] = np.nan
     phase[80:, 1, 1] = 999.0
-    vs[90:] = np.nan
-    phase[90:] = np.nan
-    valid[90:] = False
     with h5py.File(path, "w") as handle:
         handle.attrs["schema_version"] = 1
         handle.attrs["config_hash"] = "supervised-fixture"
@@ -138,7 +135,7 @@ def test_supervised_config_rejects_duplicate_seeds(tmp_path: Path) -> None:
         )
 
 
-def test_tiny_training_binds_identity_and_evaluates_only_test_rows(
+def test_tiny_training_binds_identity_and_evaluates_final_holdouts(
     four_split_dataset: Path,
     tmp_path: Path,
 ) -> None:
@@ -177,6 +174,10 @@ def test_tiny_training_binds_identity_and_evaluates_only_test_rows(
     }
     assert report["test"]["sample_count"] == 5
     assert np.isfinite(report["test"]["overall"]["mae_km_s"])
+    assert report["inversion_comparison"]["sample_count"] == 10
+    assert np.isfinite(
+        report["inversion_comparison"]["overall"]["mae_km_s"]
+    )
 
 
 def test_resume_rejects_changed_training_hyperparameters(

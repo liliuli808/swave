@@ -784,6 +784,16 @@ def train_supervised(config: SupervisedConfig) -> Path:
         device,
     )
     test_ensemble = np.mean(test_predictions, axis=0)
+    inversion_truth, inversion_predictions, inversion_kinds = _collect_predictions(
+        config.dataset_dir,
+        "inversion",
+        normalization,
+        models,
+        config.batch_size,
+        config.num_workers,
+        device,
+    )
+    inversion_ensemble = np.mean(inversion_predictions, axis=0)
     report = {
         **identity,
         "seeds": list(config.seeds),
@@ -799,6 +809,14 @@ def train_supervised(config: SupervisedConfig) -> Path:
             "ensemble": _metrics(validation_truth, validation_ensemble),
         },
         "test": _test_metrics(test_truth, test_ensemble, test_kinds),
+        "inversion_comparison": {
+            "usage": "post_training_same_sample_comparison_only",
+            **_test_metrics(
+                inversion_truth,
+                inversion_ensemble,
+                inversion_kinds,
+            ),
+        },
     }
     output = config.output_dir / "evaluation.json"
     _atomic_json_save(output, report)

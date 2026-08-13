@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - The only split policy is `mod100-v2-80-5-5-10`: train 0--79, validation 80--84, test 85--89, inversion 90--99.
-- Test and inversion rows must never affect training statistics, checkpoint selection, or hyperparameters.
+- Test and inversion rows must never affect training statistics, checkpoint selection, or hyperparameters; inversion rows may be read only after all checkpoints are fixed for the requested same-sample comparison with Section 5.
 - Formal supervised training uses seeds `0`, `1`, and `2`; the final prediction is their equal-weight ensemble.
 - `/home/jichi/swave/swave` is read-only evidence and must not be changed.
 - Old 90/5/5 and all iNETT evidence must be absent from the revised report.
@@ -191,10 +191,10 @@ def test_checkpoint_binds_current_dataset_and_split(tiny_supervised_run):
     assert len(payload["dataset_manifest_sha256"]) == 64
 
 
-def test_ensemble_evaluation_never_reads_inversion_rows(tiny_supervised_run):
+def test_ensemble_evaluation_reads_holdouts_only_after_training(tiny_supervised_run):
     report = json.loads((tiny_supervised_run / "evaluation.json").read_text())
     assert report["test"]["sample_count"] == 5
-    assert report["splits"]["inversion"] == 10
+    assert report["inversion_comparison"]["sample_count"] == 10
 ```
 
 - [ ] **Step 2: Run tests and confirm failures at the unimplemented training interfaces**
@@ -208,7 +208,7 @@ Each seed uses `seed-{seed}-last.pt`, `seed-{seed}-best.pt`, and `seed-{seed}-hi
 
 - [ ] **Step 4: Implement validation-only selection and final ensemble evaluation**
 
-At every epoch, select by physical validation MAE. After all three best checkpoints exist, evaluate their individual and equal-weight ensemble validation predictions, then read the test split once for final metrics. Write `evaluation.json` atomically with overall, family, and per-layer metrics in km/s plus sample counts and identities.
+At every epoch, select by physical validation MAE. After all three best checkpoints exist, evaluate their individual and equal-weight ensemble validation predictions, then read the test split once for final metrics. Finally, read the inversion holdout once for a same-sample comparison with Section 5; this comparison cannot influence any checkpoint or hyperparameter. Write `evaluation.json` atomically with overall, family, and per-layer metrics in km/s plus sample counts and identities.
 
 - [ ] **Step 5: Add config, CLI, and production command documentation**
 
