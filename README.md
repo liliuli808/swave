@@ -133,9 +133,10 @@ cell counts in physical units.
 The direct supervised inversion baseline uses the same four-way split as the
 forward surrogate. Only IDs ending in 0--79 contribute to input filling,
 normalization, or gradient updates; 80--84 select checkpoints; 85--89 are read
-once for final evaluation; and 90--99 remain isolated for the optimization
-inversion experiment. The production configuration trains seeds 0, 1, and 2
-and reports their equal-weight ensemble:
+once for final evaluation; and 90--99 remain isolated until the ensemble is
+fully fixed, when they are read once for the requested same-sample comparison
+with the optimization inversion experiment. The production configuration trains
+seeds 0, 1, and 2 and reports their equal-weight ensemble:
 
 ```bash
 swave train-inverse \
