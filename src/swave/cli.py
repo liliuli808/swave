@@ -108,6 +108,29 @@ def _train(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _train_inverse(arguments: argparse.Namespace) -> int:
+    from .supervised_inversion import load_supervised_config, train_supervised
+
+    config = load_supervised_config(arguments.config)
+    overrides = {
+        name: value
+        for name, value in {
+            "dataset_dir": (
+                Path(arguments.dataset_dir) if arguments.dataset_dir else None
+            ),
+            "output_dir": (
+                Path(arguments.output_dir) if arguments.output_dir else None
+            ),
+            "device": arguments.device,
+            "num_workers": arguments.num_workers,
+            "epochs": arguments.epochs,
+        }.items()
+        if value is not None
+    }
+    print(train_supervised(replace(config, **overrides)))
+    return 0
+
+
 def _evaluate(arguments: argparse.Namespace) -> int:
     metrics = evaluate(
         arguments.checkpoint,
@@ -269,6 +292,21 @@ def _build_parser() -> argparse.ArgumentParser:
     training.add_argument("--num-workers", type=int)
     training.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"))
     training.set_defaults(handler=_train)
+
+    inverse_training = subparsers.add_parser(
+        "train-inverse", help="train the split-safe supervised inversion ensemble"
+    )
+    inverse_training.add_argument(
+        "--config", default="configs/supervised-inversion-48g.toml"
+    )
+    inverse_training.add_argument("--dataset-dir")
+    inverse_training.add_argument("--output-dir")
+    inverse_training.add_argument("--epochs", type=int)
+    inverse_training.add_argument("--num-workers", type=int)
+    inverse_training.add_argument(
+        "--device", choices=("auto", "cpu", "cuda", "mps")
+    )
+    inverse_training.set_defaults(handler=_train_inverse)
 
     evaluation = subparsers.add_parser(
         "evaluate", help="evaluate a checkpoint on the test split"

@@ -128,6 +128,35 @@ swave evaluate \
 Evaluation reports per-mode MAE, RMSE, 95th-percentile absolute error, and valid
 cell counts in physical units.
 
+## Train the supervised inversion baseline
+
+The direct supervised inversion baseline uses the same four-way split as the
+forward surrogate. Only IDs ending in 0--79 contribute to input filling,
+normalization, or gradient updates; 80--84 select checkpoints; 85--89 are read
+once for final evaluation; and 90--99 remain isolated for the optimization
+inversion experiment. The production configuration trains seeds 0, 1, and 2
+and reports their equal-weight ensemble:
+
+```bash
+swave train-inverse \
+  --config configs/supervised-inversion-48g.toml \
+  --dataset-dir data/production \
+  --output-dir runs/supervised-inversion-v2 \
+  --device cuda
+```
+
+The workflow streams HDF5 rows instead of placing the million-row dataset on
+the GPU. It writes atomic `seed-<N>-last.pt` and `seed-<N>-best.pt` checkpoints,
+per-seed histories, and `evaluation.json`. Every checkpoint binds the dataset
+manifest digest, dataset configuration hash, split policy, and ordered training
+ID digest. Repeating the same command resumes only an identity-compatible run.
+
+The 476-value input is formed from four modes and 119 frequencies after
+dropping the 0.5 Hz column. Invalid higher-mode cells use train-only
+mode-frequency means. The network predicts 20 physical Vs layers after
+train-only z-score normalization; validation physical MAE is the sole
+checkpoint-selection metric.
+
 ## Run the inversion experiment
 
 Inversion minimizes a bounded L-BFGS-B objective consisting of modal-frequency

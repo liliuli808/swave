@@ -36,6 +36,7 @@ def test_help_lists_all_workflows(capsys) -> None:
         "audit-dataset",
         "generate",
         "train",
+        "train-inverse",
         "evaluate",
         "predict",
         "plot-model",
