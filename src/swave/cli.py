@@ -16,6 +16,7 @@ from .config import (
     InversionConfig,
     TrainingConfig,
     load_dataset_config,
+    load_hybrid_inversion_config,
     load_inversion_config,
     load_training_config,
 )
@@ -258,6 +259,81 @@ def _inversion_report(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _hybrid_invert(arguments: argparse.Namespace) -> int:
+    from .hybrid_runner import run_hybrid_experiment, select_prior_lambda
+
+    config = load_hybrid_inversion_config(arguments.config)
+    overrides = {
+        name: value
+        for name, value in {
+            "dataset_config": (
+                Path(arguments.dataset_config) if arguments.dataset_config else None
+            ),
+            "dataset_dir": (
+                Path(arguments.dataset_dir) if arguments.dataset_dir else None
+            ),
+            "forward_checkpoint": (
+                Path(arguments.forward_checkpoint)
+                if arguments.forward_checkpoint
+                else None
+            ),
+            "supervised_dir": (
+                Path(arguments.supervised_dir) if arguments.supervised_dir else None
+            ),
+            "output_dir": (
+                Path(arguments.output_dir) if arguments.output_dir else None
+            ),
+            "device": arguments.device,
+            "workers": arguments.workers,
+            "threads_per_worker": arguments.threads_per_worker,
+            "task_index": arguments.task_index,
+            "task_count": arguments.task_count,
+        }.items()
+        if value is not None
+    }
+    selected = replace(config, **overrides)
+    if arguments.stage == "tune":
+        print(select_prior_lambda(selected))
+        return 0
+    if arguments.stage == "test":
+        _print_json(run_hybrid_experiment(selected, "test"))
+        return 0
+    if arguments.stage == "inversion":
+        _print_json(run_hybrid_experiment(selected, "inversion"))
+        return 0
+    tuning = select_prior_lambda(selected)
+    test = run_hybrid_experiment(selected, "test")
+    inversion = run_hybrid_experiment(selected, "inversion")
+    _print_json(
+        {
+            "tuning": tuning,
+            "test": asdict(test),
+            "inversion": asdict(inversion),
+        }
+    )
+    return 0
+
+
+def _hybrid_report(arguments: argparse.Namespace) -> int:
+    from .hybrid_report import build_hybrid_report
+
+    summary = build_hybrid_report(
+        Path(arguments.results_dir),
+        Path(arguments.dataset_dir),
+        Path(arguments.output_dir),
+        baseline_summary=(
+            Path(arguments.baseline_summary) if arguments.baseline_summary else None
+        ),
+        supervised_evaluation=(
+            Path(arguments.supervised_evaluation)
+            if arguments.supervised_evaluation
+            else None
+        ),
+    )
+    _print_json(summary)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="swave",
@@ -386,6 +462,38 @@ def _build_parser() -> argparse.ArgumentParser:
     inversion_report.add_argument("--dataset-dir", default="data/production")
     inversion_report.add_argument("--output-dir", default="results/inversion-report")
     inversion_report.set_defaults(handler=_inversion_report)
+
+    hybrid = subparsers.add_parser(
+        "hybrid-invert",
+        help="tune, run, or resume sensitivity-weighted hybrid inversion",
+    )
+    hybrid.add_argument("--config", default="configs/hybrid-inversion.toml")
+    hybrid.add_argument(
+        "--stage", choices=("tune", "test", "inversion", "all"), default="all"
+    )
+    hybrid.add_argument("--dataset-config")
+    hybrid.add_argument("--dataset-dir")
+    hybrid.add_argument("--forward-checkpoint")
+    hybrid.add_argument("--supervised-dir")
+    hybrid.add_argument("--output-dir")
+    hybrid.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"))
+    hybrid.add_argument("--workers", type=int)
+    hybrid.add_argument("--threads-per-worker", type=int)
+    hybrid.add_argument("--task-index", type=int)
+    hybrid.add_argument("--task-count", type=int)
+    hybrid.set_defaults(handler=_hybrid_invert)
+
+    hybrid_report = subparsers.add_parser(
+        "hybrid-report", help="validate and summarize completed hybrid results"
+    )
+    hybrid_report.add_argument("--results-dir", default="results/hybrid-inversion")
+    hybrid_report.add_argument("--dataset-dir", default="data/production")
+    hybrid_report.add_argument(
+        "--output-dir", default="results/hybrid-inversion-report"
+    )
+    hybrid_report.add_argument("--baseline-summary")
+    hybrid_report.add_argument("--supervised-evaluation")
+    hybrid_report.set_defaults(handler=_hybrid_report)
     return parser
 
 

@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from swave.cli import main
-from swave.config import DatasetConfig, InversionConfig, PhysicsConfig
+from swave.config import (
+    DatasetConfig,
+    HybridInversionConfig,
+    InversionConfig,
+    PhysicsConfig,
+)
 from swave.inversion_results import ResultManifest
 from swave.splits import SPLIT_POLICY
 
@@ -43,6 +48,8 @@ def test_help_lists_all_workflows(capsys) -> None:
         "plot-dispersion",
         "invert",
         "inversion-report",
+        "hybrid-invert",
+        "hybrid-report",
     ):
         assert command in output
 
@@ -69,7 +76,9 @@ def test_cli_import_does_not_eagerly_load_inversion_workflows() -> None:
             (
                 "import sys; import swave.cli; "
                 "assert 'swave.inversion_runner' not in sys.modules; "
-                "assert 'swave.inversion_report' not in sys.modules"
+                "assert 'swave.inversion_report' not in sys.modules; "
+                "assert 'swave.hybrid_runner' not in sys.modules; "
+                "assert 'swave.hybrid_report' not in sys.modules"
             ),
         ],
         check=False,
@@ -100,6 +109,122 @@ def test_invert_help_exposes_all_validated_overrides(capsys) -> None:
 
     assert main(["inversion-report", "--help"]) == 0
     assert "--dataset-config" in capsys.readouterr().out
+
+
+def test_hybrid_cli_exposes_stages_and_applies_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import swave.hybrid_runner as runner_module
+
+    captured: list[HybridInversionConfig] = []
+    tuning = tmp_path / "tuning.json"
+    tuning.write_text("{}", encoding="utf-8")
+
+    def tune(config: HybridInversionConfig) -> Path:
+        captured.append(config)
+        return tuning
+
+    monkeypatch.setattr(runner_module, "select_prior_lambda", tune)
+    config_path = tmp_path / "hybrid.toml"
+    config_path.write_text("[hybrid]\nworkers = 1\n", encoding="utf-8")
+
+    assert main(["hybrid-invert", "--help"]) == 0
+    help_output = capsys.readouterr().out
+    for option in (
+        "--stage",
+        "--dataset-config",
+        "--dataset-dir",
+        "--forward-checkpoint",
+        "--supervised-dir",
+        "--output-dir",
+        "--device",
+        "--workers",
+        "--threads-per-worker",
+        "--task-index",
+        "--task-count",
+    ):
+        assert option in help_output
+
+    code = main(
+        [
+            "hybrid-invert",
+            "--config",
+            str(config_path),
+            "--stage",
+            "tune",
+            "--dataset-dir",
+            str(tmp_path / "dataset"),
+            "--forward-checkpoint",
+            str(tmp_path / "forward.pt"),
+            "--supervised-dir",
+            str(tmp_path / "supervised"),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--device",
+            "cpu",
+            "--workers",
+            "3",
+            "--threads-per-worker",
+            "2",
+            "--task-index",
+            "1",
+            "--task-count",
+            "4",
+        ]
+    )
+
+    assert code == 0
+    assert capsys.readouterr().out.strip() == str(tuning)
+    assert len(captured) == 1
+    assert captured[0].dataset_dir == tmp_path / "dataset"
+    assert captured[0].forward_checkpoint == tmp_path / "forward.pt"
+    assert captured[0].supervised_dir == tmp_path / "supervised"
+    assert captured[0].output_dir == tmp_path / "results"
+    assert (captured[0].workers, captured[0].threads_per_worker) == (3, 2)
+    assert (captured[0].task_index, captured[0].task_count) == (1, 4)
+
+
+def test_hybrid_report_cli_passes_all_artifact_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import swave.hybrid_report as report_module
+
+    captured: list[tuple[Path, Path, Path, Path | None, Path | None]] = []
+
+    def build(results, dataset, output, *, baseline_summary, supervised_evaluation):
+        captured.append(
+            (results, dataset, output, baseline_summary, supervised_evaluation)
+        )
+        return {"status": "ok"}
+
+    monkeypatch.setattr(report_module, "build_hybrid_report", build)
+    code = main(
+        [
+            "hybrid-report",
+            "--results-dir",
+            str(tmp_path / "results"),
+            "--dataset-dir",
+            str(tmp_path / "dataset"),
+            "--output-dir",
+            str(tmp_path / "report"),
+            "--baseline-summary",
+            str(tmp_path / "baseline.json"),
+            "--supervised-evaluation",
+            str(tmp_path / "supervised.json"),
+        ]
+    )
+
+    assert code == 0
+    assert captured == [
+        (
+            tmp_path / "results",
+            tmp_path / "dataset",
+            tmp_path / "report",
+            tmp_path / "baseline.json",
+            tmp_path / "supervised.json",
+        )
+    ]
+    assert json.loads(capsys.readouterr().out) == {"status": "ok"}
 
 
 def test_invert_applies_overrides_and_prints_strict_json(

@@ -252,6 +252,43 @@ outcomes from start convergence, include paired clean/noisy start effort and
 convergence deltas, and apply inclusive 1.5-IQR objective fences even when IQR
 is zero; for example, nine objectives at 1 and one at 100 reject the 100.
 
+## Run sensitivity-weighted hybrid inversion
+
+The hybrid workflow uses the fixed three-seed supervised ensemble as a soft
+learning prior inside the physical L-BFGS-B objective. At the supervised
+prediction it differentiates the forward surrogate and computes, for every
+layer, the valid-cell and mode-weighted mean dimensionless sensitivity
+`abs((Vs / c) * dc/dVs)`. The quadratic prior weight is inversely proportional
+to that sensitivity, clipped to `[0.25, 4.0]`, and normalized to mean one.
+Consequently, poorly resolved layers receive more prior support while
+sensitive layers retain more freedom to follow the observed dispersion.
+
+This stage requires the complete supervised artifacts, including
+`run-identity.json` and all ordered `seed-<N>-best.pt` checkpoints. Summary
+metrics or training histories cannot replace the best weights. The prior
+strength is selected only on the 80--84 validation fold; the 85--89 test and
+90--99 inversion folds remain final read-only evaluations.
+
+```bash
+swave hybrid-invert --config configs/hybrid-inversion.toml --stage tune
+swave hybrid-invert --config configs/hybrid-inversion.toml --stage test
+swave hybrid-invert --config configs/hybrid-inversion.toml --stage inversion
+swave hybrid-report \
+  --results-dir results/hybrid-inversion \
+  --dataset-dir data/production \
+  --output-dir results/hybrid-inversion-report \
+  --baseline-summary results/inversion-report/summary.json \
+  --supervised-evaluation runs/supervised-inversion-v2/evaluation.json
+```
+
+Every final sample is run twice from the same observation-derived reference
+model and with the same global `[0.3, 2.6]` km/s bounds: once without the
+learning prior (the global-bound control), and once with the selected weighted
+prior. This paired design separates the effect of relaxing the old
+reference-centered bounds from the effect of learned regularization. Hybrid
+artifacts use their own resumable schema under `results/hybrid-inversion` and
+never modify the existing inversion schema-v3 results.
+
 ## Predict and plot
 
 Pass exactly 20 `Vs` values:
