@@ -6,5 +6,6 @@ __pycache__/
 .coverage
 build/
 dist/
+.worktrees/
 data/
 runs/
