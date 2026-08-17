@@ -1,4 +1,10 @@
 {
+  "comparison_populations": {
+    "inversion": {
+      "sample_count": 100000,
+      "sample_id_sha256": "fbedb8df6accf778964eee1e31e7e7bf8a147d7995ac00911014409ba34e0493"
+    }
+  },
   "experiment_scopes": {
     "deep": {
       "clean_to_noise_1pct_delta": {
@@ -9222,6 +9228,10 @@
     "vs-error-by-kind-and-noise.png"
   ],
   "population_figure_scope": "full",
+  "report_generation": {
+    "archived_results": true,
+    "software_sha256": "bdc47bec3f952e6b157cefd4203836d840f54bfa5cc08e65f2a01a46d67031d7"
+  },
   "representatives": {
     "coupled": {
       "clean": {
