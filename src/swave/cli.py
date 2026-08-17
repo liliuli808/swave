@@ -254,6 +254,7 @@ def _inversion_report(arguments: argparse.Namespace) -> int:
         Path(arguments.dataset_dir),
         Path(arguments.output_dir),
         dataset_config=load_dataset_config(arguments.dataset_config),
+        allow_archived_software=arguments.allow_archived_software,
     )
     _print_json(summary)
     return 0
@@ -329,6 +330,7 @@ def _hybrid_report(arguments: argparse.Namespace) -> int:
             if arguments.supervised_evaluation
             else None
         ),
+        allow_archived_software=arguments.allow_archived_software,
     )
     _print_json(summary)
     return 0
@@ -461,6 +463,14 @@ def _build_parser() -> argparse.ArgumentParser:
     inversion_report.add_argument("--results-dir", default="results/inversion")
     inversion_report.add_argument("--dataset-dir", default="data/production")
     inversion_report.add_argument("--output-dir", default="results/inversion-report")
+    inversion_report.add_argument(
+        "--allow-archived-software",
+        action="store_true",
+        help=(
+            "read an internally consistent result set produced by an older source "
+            "digest without modifying its HDF5 files"
+        ),
+    )
     inversion_report.set_defaults(handler=_inversion_report)
 
     hybrid = subparsers.add_parser(
@@ -493,6 +503,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     hybrid_report.add_argument("--baseline-summary")
     hybrid_report.add_argument("--supervised-evaluation")
+    hybrid_report.add_argument(
+        "--allow-archived-software",
+        action="store_true",
+        help=(
+            "read internally consistent hybrid results produced by an older "
+            "source digest without modifying their HDF5 files"
+        ),
+    )
     hybrid_report.set_defaults(handler=_hybrid_report)
     return parser
 

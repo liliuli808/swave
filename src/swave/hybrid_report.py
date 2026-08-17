@@ -569,6 +569,7 @@ def build_hybrid_report(
     *,
     baseline_summary: Path | None = None,
     supervised_evaluation: Path | None = None,
+    allow_archived_software: bool = False,
 ) -> dict[str, object]:
     """Validate complete hybrid artifacts, then join truth and report metrics."""
     results_root = Path(results_dir)
@@ -581,7 +582,10 @@ def build_hybrid_report(
     for split in ("test", "inversion"):
         directory = results_root / split
         if (directory / "manifest.json").is_file():
-            manifest = validate_complete_hybrid_results(directory)
+            manifest = validate_complete_hybrid_results(
+                directory,
+                allow_archived_software=allow_archived_software,
+            )
             if manifest.split != split:
                 raise ValueError("hybrid result directory and manifest split disagree")
             if manifest.dataset_config_hash != dataset_manifest.config_hash:
@@ -590,7 +594,10 @@ def build_hybrid_report(
                 raise ValueError("hybrid result dataset manifest does not match")
             manifests[split] = (directory, manifest)
     if not manifests and (results_root / "manifest.json").is_file():
-        manifest = validate_complete_hybrid_results(results_root)
+        manifest = validate_complete_hybrid_results(
+            results_root,
+            allow_archived_software=allow_archived_software,
+        )
         manifests[manifest.split] = (results_root, manifest)
     if set(manifests) != {"test", "inversion"}:
         raise ValueError(
@@ -603,7 +610,11 @@ def build_hybrid_report(
     if len(identities) != 1:
         raise ValueError("hybrid test and inversion scientific identities do not match")
     reference_manifest = next(iter(manifests.values()))[1]
-    if reference_manifest.software_sha256 != software_sha256():
+    reporting_software_sha256 = software_sha256()
+    if (
+        not allow_archived_software
+        and reference_manifest.software_sha256 != reporting_software_sha256
+    ):
         raise ValueError("hybrid result software identity does not match this checkout")
     tuning_summary = _validated_tuning_summary(results_root, reference_manifest)
     required_ids: set[int] = set()
@@ -684,6 +695,13 @@ def build_hybrid_report(
         "schema_version": 1,
         "dataset_config_hash": dataset_manifest.config_hash,
         "dataset_manifest_sha256": dataset_digest,
+        "report_generation": {
+            "software_sha256": reporting_software_sha256,
+            "result_software_sha256": reference_manifest.software_sha256,
+            "archived_results": (
+                reference_manifest.software_sha256 != reporting_software_sha256
+            ),
+        },
         "tuning": tuning_summary,
         "splits": split_summaries,
         "comparisons": comparisons,

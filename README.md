@@ -203,6 +203,24 @@ in a new output directory. This strict restart rule prevents rows omitted from
 both noise scenarios, or results produced by different source checkouts that
 share version `0.1.0`, from being merged silently.
 
+The default report command also rejects a schema-v3 result set produced by an
+older source digest. If all raw HDF5 shards and the manifest are already
+complete, use the explicit read-only archival mode instead of rerunning the
+optimizer:
+
+```bash
+swave inversion-report \
+  --results-dir results/inversion \
+  --dataset-dir data/production \
+  --output-dir results/inversion-report \
+  --allow-archived-software
+```
+
+This mode relaxes only the current-source-digest comparison. It still validates
+the manifest, exact file set, file and content checksums, job identities, and
+sample populations, does not modify the HDF5 files, and records both the result
+and reporting source digests in `summary.json`.
+
 Deep work is split into deterministic sample-ID-bearing chunks. The production
 default `deep_samples_per_job = 10` creates 40 chunks per noise scenario for the
 400 selected rows, so each job contains at most 1,000 sequential optimizer
@@ -280,6 +298,11 @@ swave hybrid-report \
   --baseline-summary results/inversion-report/summary.json \
   --supervised-evaluation runs/supervised-inversion-v2/evaluation.json
 ```
+
+If the completed hybrid HDF5 results were produced before a reporting-code
+update, append `--allow-archived-software`. As with the inversion report, this
+is a read-only reporting exception: all stored scientific identities and
+checksums are still enforced.
 
 Every final sample is run twice from the same observation-derived reference
 model and with the same global `[0.3, 2.6]` km/s bounds: once without the

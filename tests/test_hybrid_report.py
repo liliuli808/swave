@@ -8,6 +8,7 @@ import h5py
 import numpy as np
 import pytest
 
+import swave.hybrid_results as hybrid_results_module
 from swave.config import (
     HybridInversionConfig,
     hybrid_inversion_identity_hash,
@@ -87,7 +88,12 @@ def _report_batch(
     )
 
 
-def _complete_hybrid_results(tmp_path: Path, dataset_dir: Path) -> Path:
+def _complete_hybrid_results(
+    tmp_path: Path,
+    dataset_dir: Path,
+    *,
+    software_digest: str | None = None,
+) -> Path:
     root = tmp_path / "hybrid-results"
     forward = tmp_path / "forward.pt"
     forward.write_bytes(b"forward")
@@ -108,7 +114,7 @@ def _complete_hybrid_results(tmp_path: Path, dataset_dir: Path) -> Path:
         "supervised_seeds": [0, 1, 2],
         "supervised_run_identity_sha256": "b" * 64,
         "hybrid_config_hash": hybrid_inversion_identity_hash(config),
-        "software_sha256": software_sha256(),
+        "software_sha256": software_digest or software_sha256(),
         "validation_sample_count": 1,
         "validation_sample_id_sha256": sample_id_sha256(validation_ids),
         "validation_sample_ids": [80],
@@ -205,6 +211,42 @@ def test_hybrid_report_rejects_duplicate_sample_ids_across_shards(
     batch = _report_batch(tiny_complete_dataset)
     with pytest.raises(ValueError, match="duplicated across shards"):
         _population_identity({"clean": [batch, batch]})
+
+
+def test_hybrid_report_explicitly_reads_archived_results(
+    tiny_complete_dataset: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archived_software_sha256 = "9" * 64
+    current_software_sha256 = software_sha256()
+    with monkeypatch.context() as archived_context:
+        archived_context.setattr(
+            hybrid_results_module,
+            "software_sha256",
+            lambda: archived_software_sha256,
+        )
+        root = _complete_hybrid_results(
+            tmp_path,
+            tiny_complete_dataset,
+            software_digest=archived_software_sha256,
+        )
+
+    with pytest.raises(ValueError, match="software identity"):
+        build_hybrid_report(root, tiny_complete_dataset, tmp_path / "strict-report")
+
+    summary = build_hybrid_report(
+        root,
+        tiny_complete_dataset,
+        tmp_path / "archived-report",
+        allow_archived_software=True,
+    )
+
+    assert summary["report_generation"] == {
+        "software_sha256": current_software_sha256,
+        "result_software_sha256": archived_software_sha256,
+        "archived_results": True,
+    }
 
 
 def test_hybrid_report_rejects_cross_split_scientific_identity_mismatch(

@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 import swave.inversion_report as report_module
+import swave.inversion_results as results_module
 from swave.config import (
     DatasetConfig,
     InversionConfig,
@@ -637,7 +638,7 @@ def test_report_validates_complete_results_before_loading_truth(
     monkeypatch.setattr(
         report_module,
         "validate_complete_results",
-        lambda path: (
+        lambda path, **kwargs: (
             events.append("validated")
             or (_ for _ in ()).throw(ValueError("result manifest is incomplete"))
         ),
@@ -678,7 +679,7 @@ def test_report_checksum_validates_dataset_identity_before_truth(
     monkeypatch.setattr(
         report_module,
         "validate_complete_results",
-        lambda path: events.append("results") or manifest,
+        lambda path, **kwargs: events.append("results") or manifest,
     )
     monkeypatch.setattr(
         report_module,
@@ -844,6 +845,54 @@ def test_report_requires_the_matching_dataset_configuration(
             tmp_path / "wrong-config",
             dataset_config=DatasetConfig(),
         )
+
+
+def test_report_explicitly_migrates_internally_valid_archived_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset, truth = _source_dataset(tmp_path)
+    checkpoint = tmp_path / "best.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    archived_software_sha256 = "e" * 64
+    current_software_sha256 = results_module.software_sha256()
+
+    with monkeypatch.context() as archived_context:
+        archived_context.setattr(
+            results_module,
+            "software_sha256",
+            lambda: archived_software_sha256,
+        )
+        results = _complete_results(tmp_path, checkpoint, truth)
+
+    with pytest.raises(ValueError, match="software identity"):
+        build_inversion_report(
+            results,
+            dataset,
+            tmp_path / "strict-report",
+            dataset_config=REPORT_DATASET_CONFIG,
+        )
+
+    summary = build_inversion_report(
+        results,
+        dataset,
+        tmp_path / "archived-report",
+        dataset_config=REPORT_DATASET_CONFIG,
+        allow_archived_software=True,
+    )
+
+    assert summary["result_identity"]["software_sha256"] == archived_software_sha256
+    assert summary["report_generation"] == {
+        "software_sha256": current_software_sha256,
+        "archived_results": True,
+    }
+    assert summary["comparison_populations"] == {
+        "inversion": {
+            "sample_count": 4,
+            "sample_id_sha256": (
+                "04d30ff5f0c62309a701b7a323886d6e7fb886749353bd7bc76671bc0efe3163"
+            ),
+        }
+    }
 
 
 def test_report_separates_scopes_and_writes_deterministic_artifacts(

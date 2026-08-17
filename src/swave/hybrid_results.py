@@ -714,10 +714,19 @@ def mark_hybrid_job_complete(
         return updated
 
 
-def validate_complete_hybrid_results(output_dir: Path | str) -> HybridManifest:
+def validate_complete_hybrid_results(
+    output_dir: Path | str,
+    *,
+    allow_archived_software: bool = False,
+) -> HybridManifest:
+    if type(allow_archived_software) is not bool:
+        raise TypeError("allow_archived_software must be a boolean")
     directory = Path(output_dir)
     manifest = _load_manifest(directory / "manifest.json")
-    if manifest.software_sha256 != software_sha256():
+    if (
+        not allow_archived_software
+        and manifest.software_sha256 != software_sha256()
+    ):
         raise ValueError("hybrid result software identity does not match this checkout")
     if not manifest.complete:
         raise ValueError("hybrid result manifest is incomplete")

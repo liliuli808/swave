@@ -189,11 +189,26 @@ def test_hybrid_report_cli_passes_all_artifact_paths(
 ) -> None:
     import swave.hybrid_report as report_module
 
-    captured: list[tuple[Path, Path, Path, Path | None, Path | None]] = []
+    captured: list[tuple[Path, Path, Path, Path | None, Path | None, bool]] = []
 
-    def build(results, dataset, output, *, baseline_summary, supervised_evaluation):
+    def build(
+        results,
+        dataset,
+        output,
+        *,
+        baseline_summary,
+        supervised_evaluation,
+        allow_archived_software,
+    ):
         captured.append(
-            (results, dataset, output, baseline_summary, supervised_evaluation)
+            (
+                results,
+                dataset,
+                output,
+                baseline_summary,
+                supervised_evaluation,
+                allow_archived_software,
+            )
         )
         return {"status": "ok"}
 
@@ -211,6 +226,7 @@ def test_hybrid_report_cli_passes_all_artifact_paths(
             str(tmp_path / "baseline.json"),
             "--supervised-evaluation",
             str(tmp_path / "supervised.json"),
+            "--allow-archived-software",
         ]
     )
 
@@ -222,6 +238,7 @@ def test_hybrid_report_cli_passes_all_artifact_paths(
             tmp_path / "report",
             tmp_path / "baseline.json",
             tmp_path / "supervised.json",
+            True,
         )
     ]
     assert json.loads(capsys.readouterr().out) == {"status": "ok"}
@@ -339,7 +356,7 @@ def test_inversion_report_passes_directories_and_prints_strict_json(
 ) -> None:
     import swave.inversion_report as report_module
 
-    captured: list[tuple[Path, Path, Path, DatasetConfig]] = []
+    captured: list[tuple[Path, Path, Path, DatasetConfig, bool]] = []
 
     def build(
         results: Path,
@@ -347,8 +364,11 @@ def test_inversion_report_passes_directories_and_prints_strict_json(
         output: Path,
         *,
         dataset_config: DatasetConfig,
+        allow_archived_software: bool,
     ) -> dict[str, object]:
-        captured.append((results, dataset, output, dataset_config))
+        captured.append(
+            (results, dataset, output, dataset_config, allow_archived_software)
+        )
         return {"schema_version": 1, "value": 1.25, "missing": None}
 
     monkeypatch.setattr(report_module, "build_inversion_report", build)
@@ -372,6 +392,7 @@ def test_inversion_report_passes_directories_and_prints_strict_json(
             str(dataset),
             "--output-dir",
             str(output),
+            "--allow-archived-software",
         ]
     )
 
@@ -382,6 +403,7 @@ def test_inversion_report_passes_directories_and_prints_strict_json(
             dataset,
             output,
             DatasetConfig(physics=PhysicsConfig(fmin=1.0, fmax=120.0, fstep=1.0)),
+            True,
         )
     ]
     assert json.loads(capsys.readouterr().out) == {

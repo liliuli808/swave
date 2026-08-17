@@ -949,6 +949,35 @@ def test_mark_complete_is_idempotent_and_complete_validation_is_strict(
         validate_complete_results(tmp_path)
 
 
+def test_archived_validation_still_rejects_result_shard_tampering(
+    tmp_path: Path,
+    checkpoint: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with monkeypatch.context() as archived_context:
+        archived_context.setattr(
+            results_module,
+            "software_sha256",
+            lambda: "e" * 64,
+        )
+        manifest = initialize_result_manifest(
+            tmp_path,
+            dataset_config_hash="a" * 64,
+            checkpoint=checkpoint,
+            inversion_config_hash="b" * 64,
+            experiment="full",
+            expected_jobs=(JOB_A,),
+        )
+        path = write_result_shard(tmp_path, JOB_A, _batch(), manifest)
+        mark_job_complete(tmp_path, JOB_A, path)
+
+    with h5py.File(path, "r+") as handle:
+        handle["inverted_vs"][0, 0] = np.float32(2.0)
+
+    with pytest.raises(ValueError, match="content checksum|file checksum"):
+        validate_complete_results(tmp_path, allow_archived_software=True)
+
+
 def test_partial_temporary_file_never_counts_as_a_completed_job(
     tmp_path: Path, checkpoint: Path
 ) -> None:

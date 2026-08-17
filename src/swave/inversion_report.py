@@ -23,6 +23,7 @@ from .inversion_results import (
     ResultBatch,
     ResultManifest,
     sample_id_sha256,
+    software_sha256,
     validate_complete_results,
     validate_result_shard,
 )
@@ -1347,6 +1348,7 @@ def build_inversion_report(
     output_dir: Path | str,
     *,
     dataset_config: DatasetConfig,
+    allow_archived_software: bool = False,
 ) -> dict[str, Any]:
     """Build a deterministic report after validating the complete result set."""
     results_path = Path(results_dir)
@@ -1354,7 +1356,10 @@ def build_inversion_report(
 
     # This must remain the first external-data action: truth is unavailable until the
     # entire immutable result identity and every result shard have passed validation.
-    manifest = validate_complete_results(results_path)
+    manifest = validate_complete_results(
+        results_path,
+        allow_archived_software=allow_archived_software,
+    )
     _validate_dataset_identity(dataset_path, manifest)
     grouped_batches = _load_result_groups(results_path, manifest)
     requested_ids = _validate_result_alignment(grouped_batches)
@@ -1443,6 +1448,7 @@ def build_inversion_report(
                     "figure": figure_name,
                 }
 
+    reporting_software_sha256 = software_sha256()
     summary: dict[str, Any] = {
         "schema_version": 2,
         "units": {
@@ -1458,6 +1464,12 @@ def build_inversion_report(
             "split_policy": manifest.split_policy,
             "experiment": manifest.experiment,
             "software_sha256": manifest.software_sha256,
+        },
+        "report_generation": {
+            "software_sha256": reporting_software_sha256,
+            "archived_results": (
+                manifest.software_sha256 != reporting_software_sha256
+            ),
         },
         "scope_policy": (
             "full and deep rows are reported independently; figures never pool "

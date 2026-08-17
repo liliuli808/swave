@@ -1440,11 +1440,23 @@ def _canonical_job_group(job: str) -> str:
     return f"{experiment}-{noise}"
 
 
-def validate_complete_results(results_dir: Path | str) -> ResultManifest:
-    """Verify the exact complete manifest, file set, hashes, and shard contents."""
+def validate_complete_results(
+    results_dir: Path | str,
+    *,
+    allow_archived_software: bool = False,
+) -> ResultManifest:
+    """Verify the exact complete manifest, file set, hashes, and shard contents.
+
+    ``allow_archived_software`` relaxes only the comparison between the manifest's
+    recorded source digest and this checkout. All manifest, shard, content, and
+    sample-population identities remain mandatory.
+    """
+    if type(allow_archived_software) is not bool:
+        raise TypeError("allow_archived_software must be a boolean")
     directory = _result_directory(results_dir, create=False)
     manifest = _load_manifest(directory / "manifest.json")
-    _require_current_software(manifest)
+    if not allow_archived_software:
+        _require_current_software(manifest)
     if not manifest.complete:
         raise ValueError("result manifest is incomplete")
     if manifest.completed_jobs != manifest.expected_jobs:
