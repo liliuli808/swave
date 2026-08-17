@@ -156,7 +156,7 @@ Run:
 rg -o '\\includegraphics\[[^]]*\]\{figures/[^}]+\}' /home/jichi/zuoye/result/report.tex
 ```
 
-Copy exactly the nine resulting PNG names. Do not copy unreferenced result figures.
+Copy exactly the eight resulting PNG names. Do not copy unreferenced result figures.
 
 - [ ] **Step 2: Copy the three small evidence files**
 

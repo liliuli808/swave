@@ -1,0 +1,108 @@
+{
+  "dataset_config_hash": "39cffcbc3437e8483da6b0da9442802fe9184fa8c070a4ea06b204ed61f355ec",
+  "dataset_manifest_sha256": "ceecda31ae9dec3fcf11c7c82f185cae1bbd37014893cc58f99820bcf339ae47",
+  "duplicates": {
+    "definition": "exact fixed-schema raw array byte equality; SHA-256 is used only to locate candidates",
+    "full_record": {
+      "cross_split_groups": 0,
+      "duplicate_groups": 0,
+      "duplicate_rows": 0,
+      "examples": [],
+      "extra_duplicate_rows": 0
+    },
+    "vs": {
+      "cross_split_groups": 0,
+      "duplicate_groups": 0,
+      "duplicate_rows": 0,
+      "examples": [],
+      "extra_duplicate_rows": 0
+    }
+  },
+  "geology": {
+    "by_kind": {
+      "COUPLED": 500418,
+      "HIGH_VELOCITY": 99742,
+      "LOW_VELOCITY": 149812,
+      "NORMAL": 250028
+    },
+    "deterministic_reconstruction_mismatches": 0,
+    "interpretation_limit": "The checks validate the declared synthetic one-dimensional geology rules; they do not establish agreement with field geology.",
+    "rule_statistics": {
+      "COUPLED": {
+        "anomaly_end_layer_index_range": [
+          4,
+          11
+        ],
+        "anomaly_layer_count": {
+          "3": 250193,
+          "4": 250225
+        },
+        "anomaly_start_layer_index_range": [
+          2,
+          9
+        ],
+        "contrast_range": [
+          0.0800004108430749,
+          0.3499989133465214
+        ]
+      },
+      "HIGH_VELOCITY": {
+        "anomaly_end_layer_index_range": [
+          2,
+          11
+        ],
+        "anomaly_layer_count": {
+          "1": 49776,
+          "2": 49966
+        },
+        "anomaly_start_layer_index_range": [
+          2,
+          11
+        ],
+        "contrast_range": [
+          0.08000063038287433,
+          0.34999912045364
+        ]
+      },
+      "LOW_VELOCITY": {
+        "anomaly_end_layer_index_range": [
+          2,
+          11
+        ],
+        "anomaly_layer_count": {
+          "1": 50043,
+          "2": 49648,
+          "3": 50121
+        },
+        "anomaly_start_layer_index_range": [
+          2,
+          11
+        ],
+        "contrast_range": [
+          0.08000847750548991,
+          0.34999790632159294
+        ]
+      },
+      "NORMAL": {
+        "anomaly_end_layer_index_range": null,
+        "anomaly_layer_count": {},
+        "anomaly_start_layer_index_range": null,
+        "contrast_range": null
+      }
+    },
+    "violation_reasons": {},
+    "violations": 0
+  },
+  "identity": {
+    "sample_count": 1000000,
+    "sample_ids_contiguous": true,
+    "sample_ids_unique": true,
+    "split_counts": {
+      "inversion": 100000,
+      "test": 50000,
+      "train": 800000,
+      "validation": 50000
+    }
+  },
+  "schema_version": 1
+}
