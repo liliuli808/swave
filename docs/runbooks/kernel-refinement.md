@@ -118,16 +118,35 @@ must not fall below the epoch -1 value for long.
 
 ## 6. Tuning if acceptance is NOT YET
 
-Apply one change at a time; delete `runs/kernel-finetune/` (or set a new
-`OUTPUT_DIR`) before each new run, then rerun the script.
+### Result of the first GPU run (2026-10-07, 50-epoch fine-tune, defaults)
+
+| model | curves ≤ 1 % | points ≤ 1 % | max rel | kernel rows ≤ 5 % | kernel median |
+| --- | --- | --- | --- | --- | --- |
+| base | 96.674 % | 99.9755 % | 6.438 % | 92.129 % | 0.740 % |
+| finetuned | 95.934 % | 99.9751 % | 7.133 % | 94.345 % | 0.721 % |
+
+Kernel agreement improved only slightly while value agreement fell: the
+1.4 M-parameter network (width 256, 4 blocks) cannot fit both the curves and
+the abrupt M2/M3 kernel switches at mode-kissing frequencies. **Next run: a
+wider network trained from scratch with the kernel loss** (7.6 M parameters):
+
+```bash
+OUTPUT_DIR=runs/kernel-wide RESULTS_DIR=results/forward-kernel-wide \
+WIDTH=512 BLOCKS=6 EPOCHS=300 LEARNING_RATE=1e-3 WARMUP_STEPS=2000 \
+nohup bash scripts/run_kernel_refinement.sh > kernel-wide.out 2>&1 &
+```
+
+Kernel labels from the first run are reused (stage 1 skips them). Epoch -1
+prints `score 2.0` because training starts from random weights; that is
+expected. The wide checkpoint loads through `ForwardPredictor` and the inversion
+loader without changes (architecture is stored in the checkpoint).
+
+### Further knobs (one change at a time, fresh `OUTPUT_DIR` each run)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.
-2. Values regress during training: `LEARNING_RATE=1e-4` or `KERNEL_WEIGHT=0.3`.
-3. Both plateau: `EPOCHS=150`.
-4. Still plateauing: capacity limit. Add `--width 512 --blocks 6` to the
-   fine-tune command (training then starts from random weights; use
-   `EPOCHS=300 LEARNING_RATE=1e-3 WARMUP_STEPS=2000`). `ForwardPredictor` and
-   the inversion loader already read the architecture from the checkpoint.
+2. Values regress during training: `LEARNING_RATE` halved or `KERNEL_WEIGHT=0.3`.
+3. Both still improving at the last epoch: more `EPOCHS`.
+4. Wide model plateaus below target: `WIDTH=768 BLOCKS=8`.
 
 ## 7. Report back
 
@@ -138,7 +157,8 @@ Return these to the requester:
 * `results/forward-kernel/finetune-history.json`,
 * the figures `results/forward-kernel/*.png`.
 
-Commit `results/forward-kernel/` (small) on the branch. Do **not** commit
+Commit the run's `RESULTS_DIR` (small) on the branch, together with the
+`.out` log copied into it. Do **not** commit
 `data/` or `runs/` (gitignored, large). Do not modify the production shards.
 
 ## 8. Troubleshooting
