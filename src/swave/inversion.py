@@ -14,7 +14,7 @@ from torch import Tensor, nn
 
 from .config import NoiseScenario
 from .inference import resolve_device
-from .network import FourHeadForwardModel
+from .network import model_from_checkpoint
 from .splits import validate_checkpoint_split_policy
 
 
@@ -292,8 +292,7 @@ class DifferentiableSurrogate:
             weights_only=False,
         )
         validate_checkpoint_split_policy(payload)
-        model = FourHeadForwardModel()
-        model.load_state_dict(payload["model"])
+        model = model_from_checkpoint(payload)
         return cls(
             model=model,
             input_mean=np.array(payload["input_mean"], dtype=np.float64, copy=True),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import torch
 from torch import Tensor, nn
 from torch.nn import functional
@@ -58,6 +60,14 @@ class FourHeadForwardModel(nn.Module):
             )
         features = self.backbone(self.input(vs))
         return torch.stack([head(features) for head in self.heads], dim=1)
+
+
+def model_from_checkpoint(payload: Mapping[str, object]) -> FourHeadForwardModel:
+    """Build the network described by a checkpoint and load its weights."""
+    architecture = payload.get("architecture") or {}
+    model = FourHeadForwardModel(**dict(architecture))
+    model.load_state_dict(payload["model"])
+    return model
 
 
 def masked_smooth_l1(

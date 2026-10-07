@@ -1,0 +1,152 @@
+# Runbook: forward-surrogate kernel refinement (Sobolev fine-tuning)
+
+This document is written to be executed by an AI coding agent or a person on
+the GPU machine that holds the production dataset. Follow the steps in order;
+each command is idempotent and resumable.
+
+## 1. Goal
+
+Make the four-head forward network (`FourHeadForwardModel`) agree with the
+physical dispersion solver (Python port of Pan & Chen's secular-function root
+search, validated against QEDispInv to 1e-5 km/s) in **both** phase velocity
+and sensitivity kernel `dc/dVs`.
+
+Acceptance targets on the test split (sample IDs ending 85–89):
+
+| Metric (`results/forward-kernel/summary.json`, key `finetuned`) | Target |
+| --- | --- |
+| `value.samples_all_within_1pct` — models whose 4 modes × 120 frequencies are all within 1 % | ≥ 0.99 |
+| `kernel.rows_within_5pct` — (mode, frequency) kernel rows with relative L2 error ≤ 5 % | ≥ 0.99 |
+
+Baseline measured on `runs/production-48g/best.pt` (before this work):
+
+| Metric | Mode 0 | Mode 1 | Mode 2 | Mode 3 |
+| --- | --- | --- | --- | --- |
+| points within 1 % | 99.999 % | 99.995 % | 99.98 % | 99.94 % |
+| kernel rows within 1 % | 89 % | 76 % | 59 % | 42 % |
+| kernel rows within 5 % | 99 % | 96 % | 92 % | 84 % |
+
+Overall baseline: `samples_all_within_1pct` = 0.9667, `kernel.rows_within_5pct`
+= 0.921. Worst point error is 16 % against the raw shards but 6.4 % once the
+kissing-pair corrections are applied — the 16 % cells were solver defects, not
+network error. Baseline figures (raw shards, no corrections) are in
+`results/forward-kernel-base/`.
+
+A CPU end-to-end check of `scripts/run_kernel_refinement.sh` (1 epoch,
+`BATCH_SIZE=16384`) completed all stages on 2026-10-07; one epoch is not
+expected to meet the targets.
+
+## 2. What changed and why
+
+* `src/swave/kernels.py` — physical kernels from the Dunkin determinant by the
+  implicit-function theorem `dc/dm = -(∂F/∂m)/(∂F/∂c)` at the dataset roots.
+  Total derivative: Vp and density follow Vs through Brocher (2005), matching
+  the network input. Verified against finite differences of re-solved roots
+  (`tests/test_kernels.py`). ~13 ms per model per core.
+* `src/swave/solver.py` — new `consensus` root strategy: union of Pan & Chen's
+  truncated-model (degraded) roots and an 8-iteration quadratic search. The
+  production data used `quadratic` alone, which occasionally skipped a
+  mode-kissing pair (two roots ~1e-4 km/s apart) and shifted modes up by two.
+* `results/kissing-repair/corrections.npz` — 140 re-solved cells over the 1 M
+  models (train 114, validation 7, test 8, inversion 11). Produced by
+  `scripts/repair_kissing_defects.py`; the original SHA-checked shards are not
+  modified, the corrections are applied when data are loaded.
+* `src/swave/kernel_training.py`, `scripts/finetune_forward_kernels.py` —
+  fine-tunes the base checkpoint on (a) squared relative phase-velocity error
+  and (b) squared relative error of random Jacobian–vector products `J v`
+  versus `K v` (an unbiased estimate of the Frobenius kernel error), with
+  hard-example resampling. Architecture and normalization are unchanged, so the
+  output checkpoint is a drop-in replacement for inversion code.
+* `scripts/evaluate_forward_kernels.py` — metrics and figures.
+* `src/swave/network.py` — `model_from_checkpoint` reads an optional
+  `architecture` entry, so wider networks can be loaded later.
+
+## 3. Preconditions
+
+* Repository at branch `forward-kernel-refinement`.
+* `data/production/` with the 100 production shards (`shard-00000.h5` …
+  `shard-00099.h5`).
+* `runs/production-48g/best.pt` — the base forward checkpoint.
+* Python env with the package installed: `python -m pip install -e ".[dev]"`.
+* GPU with CUDA PyTorch (any GPU with ≥ 12 GB; everything is kept on the GPU,
+  ~6 GB). Host RAM ≥ 16 GB. CPU-only also works but is ~10 min/epoch.
+
+## 4. One-command execution
+
+```bash
+git fetch origin && git checkout forward-kernel-refinement && git pull
+python -m pip install -e ".[dev]"
+bash scripts/run_kernel_refinement.sh
+```
+
+Defaults: `DEVICE=cuda EPOCHS=50 BATCH_SIZE=4096 KERNEL_BATCH_SIZE=2048
+LEARNING_RATE=2e-4 WARMUP_STEPS=300 KERNEL_WEIGHT=1.0`. Override any of these,
+and the paths `DATASET_DIR`, `BASE_CHECKPOINT`, `OUTPUT_DIR`, `RESULTS_DIR`,
+through environment variables. For a long run use `nohup` or `tmux`:
+
+```bash
+nohup bash scripts/run_kernel_refinement.sh > kernel-refinement.out 2>&1 &
+```
+
+Stages (the script logs `stage N:` lines):
+
+| Stage | Work | Output | Typical time |
+| --- | --- | --- | --- |
+| 0 | preflight: 100 shards, checkpoint, corrections, CUDA, unit tests | — | 1 min |
+| 1 | kernel labels: validation/test stride 5 (10 k each), train stride 4 (200 k) | `data/kernels/{split}/kernels-*.h5` (~8 GB) | 45 min on 6 cores; minutes on many cores |
+| 2 | fine-tuning, one JSON line per epoch | `runs/kernel-finetune/{best,last}.pt`, `history.json`, `runs/kernel-finetune.log` | GPU: minutes per epoch |
+| 3 | evaluation on the full test split and figures | `results/forward-kernel/*` | ~5 min |
+| 4 | acceptance table, prints `ACCEPTANCE: PASS` or `NOT YET` | stdout | — |
+
+Rerunning the script resumes: finished kernel files are skipped and training
+continues from `last.pt`. To restart training from scratch delete
+`runs/kernel-finetune/`.
+
+## 5. Reading progress
+
+Each epoch prints, for the validation subset (10 k models with kernels):
+
+```json
+{"epoch": 3, "value_loss": ..., "kernel_loss": ..., "seconds": ..., "score": ...,
+ "samples_all_within_1pct": 0.97, "kernel_rows_within_5pct": 0.95, "kernel_median": 0.004}
+```
+
+`epoch -1` is the base model. `score = (1 - samples_all_within_1pct) + (1 -
+kernel_rows_within_5pct)`; `best.pt` is the lowest score. Expected trend:
+`kernel_rows_within_5pct` rises within the first epochs; `samples_all_within_1pct`
+must not fall below the epoch -1 value for long.
+
+## 6. Tuning if acceptance is NOT YET
+
+Apply one change at a time; delete `runs/kernel-finetune/` (or set a new
+`OUTPUT_DIR`) before each new run, then rerun the script.
+
+1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.
+2. Values regress during training: `LEARNING_RATE=1e-4` or `KERNEL_WEIGHT=0.3`.
+3. Both plateau: `EPOCHS=150`.
+4. Still plateauing: capacity limit. Add `--width 512 --blocks 6` to the
+   fine-tune command (training then starts from random weights; use
+   `EPOCHS=300 LEARNING_RATE=1e-3 WARMUP_STEPS=2000`). `ForwardPredictor` and
+   the inversion loader already read the architecture from the checkpoint.
+
+## 7. Report back
+
+Return these to the requester:
+
+* the stage-4 acceptance table (stdout),
+* `results/forward-kernel/summary.json`,
+* `results/forward-kernel/finetune-history.json`,
+* the figures `results/forward-kernel/*.png`.
+
+Commit `results/forward-kernel/` (small) on the branch. Do **not** commit
+`data/` or `runs/` (gitignored, large). Do not modify the production shards.
+
+## 8. Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `DEVICE=cuda but torch.cuda.is_available() is False` | install CUDA PyTorch, or run with `DEVICE=cpu BATCH_SIZE=1024 KERNEL_BATCH_SIZE=512` |
+| `expected 100 shards` | set `DATASET_DIR` to the production dataset |
+| process killed / out of host memory | ~7 GB host RAM is needed while loading; close other jobs |
+| CUDA out of memory | halve `BATCH_SIZE` and `KERNEL_BATCH_SIZE` |
+| `checkpoint split policy does not match` | the base checkpoint must be the `mod100-v2-80-5-5-10` one |

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import numpy as np
@@ -18,7 +18,8 @@ from .sampling import (
 )
 from .secular import LayeredModel, RayleighSecular, SecularNumericalError
 
-RootStrategy = Literal["raw", "degraded", "quadratic"]
+RootStrategy = Literal["raw", "degraded", "quadratic", "consensus"]
+_CONSENSUS_QUADRATIC_ITERATIONS = 8
 _QUADRATIC_ROOT_BIAS = 2
 
 
@@ -204,10 +205,15 @@ class DispersionSolver:
         self, frequency: float, strategy: RootStrategy | None = None
     ) -> FrequencySolution:
         selected = strategy or self.config.strategy
-        if selected not in {"raw", "degraded", "quadratic"}:
-            raise ValueError("strategy must be raw, degraded, or quadratic")
+        if selected not in {"raw", "degraded", "quadratic", "consensus"}:
+            raise ValueError(
+                "strategy must be raw, degraded, quadratic, or consensus"
+            )
         if frequency <= 0 or not np.isfinite(frequency):
             raise ValueError("frequency must be finite and positive")
+
+        if selected == "consensus":
+            return self._solve_consensus(frequency)
 
         if selected in {"raw", "quadratic"}:
             roots, count, failed = self._solve_model(
@@ -242,6 +248,32 @@ class DispersionSolver:
             final_roots,
             total_count,
             status=1 if failed else 0,
+        )
+
+    def _solve_consensus(self, frequency: float) -> FrequencySolution:
+        """Union of Pan & Chen's truncated-model roots and deep quadratic search.
+
+        A mode-kissing pair can be separated by ~1e-4 km/s. Either search alone
+        occasionally steps over such a pair, which drops two roots and shifts
+        every higher mode; their union recovers the pair in every defect found
+        in the production dataset.
+        """
+        deep = replace(
+            self.config, quadratic_iterations=_CONSENSUS_QUADRATIC_ITERATIONS
+        )
+        quadratic = DispersionSolver(self.model, deep).solve_frequency(
+            frequency, "quadratic"
+        )
+        degraded = self.solve_frequency(frequency, "degraded")
+        roots = deduplicate_roots(
+            np.concatenate([quadratic.roots, degraded.roots]),
+            self.config.dedup_tolerance,
+        )[: self.config.mode_count]
+        return FrequencySolution(
+            frequency,
+            roots,
+            quadratic.evaluations + degraded.evaluations,
+            status=max(quadratic.status, degraded.status),
         )
 
     def solve_grid(

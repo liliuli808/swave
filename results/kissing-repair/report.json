@@ -1,0 +1,22 @@
+{
+  "train": {
+    "rows": 800000,
+    "checked_cells": 81671,
+    "corrected_cells": 114
+  },
+  "validation": {
+    "rows": 50000,
+    "checked_cells": 6464,
+    "corrected_cells": 7
+  },
+  "test": {
+    "rows": 50000,
+    "checked_cells": 5700,
+    "corrected_cells": 8
+  },
+  "inversion": {
+    "rows": 100000,
+    "checked_cells": 11646,
+    "corrected_cells": 11
+  }
+}

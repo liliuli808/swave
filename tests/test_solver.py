@@ -69,3 +69,19 @@ def test_quadratic_search_stops_after_biased_coarse_root_budget() -> None:
     )
     assert solution.evaluations < 1_000
     assert solution.status == pytest.approx(0)
+
+
+def test_consensus_recovers_mode_kissing_pair_missed_by_quadratic() -> None:
+    # Production test row 631489: at 5.5 Hz a kissing pair 1e-4 km/s apart was
+    # skipped by the quadratic search, shifting modes 0-3 up by two roots.
+    vs = np.array([
+        0.642038, 0.664962, 0.73239, 0.567805, 0.614541, 0.927121, 1.012011,
+        1.138163, 1.225484, 1.268235, 1.295506, 1.36333, 1.442533, 1.505713,
+        1.637385, 1.818105, 1.940122, 2.029348, 2.109967, 2.163218,
+    ])
+    solver = DispersionSolver(LayeredModel.from_vs(vs), PhysicsConfig())
+    consensus = solver.solve_frequency(5.5, "consensus").roots
+    np.testing.assert_allclose(
+        consensus, [0.6103, 0.6104, 0.6803, 0.7027], atol=1e-4
+    )
+    assert consensus[1] - consensus[0] < 5e-4

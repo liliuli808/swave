@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from numpy.typing import ArrayLike, NDArray
 
-from .network import FourHeadForwardModel
+from .network import FourHeadForwardModel, model_from_checkpoint
 from .splits import validate_checkpoint_split_policy
 
 VS_MIN = 0.3
@@ -55,8 +55,7 @@ class ForwardPredictor:
             weights_only=False,
         )
         validate_checkpoint_split_policy(payload)
-        model = FourHeadForwardModel()
-        model.load_state_dict(payload["model"])
+        model = model_from_checkpoint(payload)
         model.to(selected_device)
         model.eval()
         input_mean = np.asarray(payload["input_mean"], dtype=np.float32)

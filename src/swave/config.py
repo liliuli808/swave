@@ -45,8 +45,10 @@ class PhysicsConfig:
             raise ValueError("refinement iteration counts must be nonnegative")
         if self.root_tolerance <= 0 or self.dedup_tolerance <= 0:
             raise ValueError("root tolerances must be positive")
-        if self.strategy not in {"raw", "degraded", "quadratic"}:
-            raise ValueError("strategy must be raw, degraded, or quadratic")
+        if self.strategy not in {"raw", "degraded", "quadratic", "consensus"}:
+            raise ValueError(
+                "strategy must be raw, degraded, quadratic, or consensus"
+            )
 
     @property
     def frequencies(self) -> np.ndarray:
