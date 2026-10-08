@@ -92,10 +92,11 @@ def main() -> int:
                 print(f"  {name:<18} {100 * sub.mean():6.2f}% of its rows fail")
 
         # denominator diagnosis: are failing rows near-zero-norm rows?
-        print(f"median |kernel| of failing rows:  {np.median(norm_phys[bm]):.4g}")
-        print(f"median |kernel| of passing rows:  {np.median(norm_phys[mask & ~bad]):.4g}")
+        nm = norm_phys[:, m]
+        print(f"median |kernel| of failing rows:  {np.median(nm[bm]):.4g}")
+        print(f"median |kernel| of passing rows:  {np.median(nm[mask[:, m] & ~bm]):.4g}")
         print(f"failing rows with |kernel| < 1% of median: "
-              f"{100 * (norm_phys[bm] < 0.01 * np.median(norm_phys[mask])).mean():.1f}%")
+              f"{100 * (nm[bm] < 0.01 * np.median(nm[mask[:, m]])).mean():.1f}%")
 
         # error excluding the worst 2.4%: how close is the body to the target?
         e = np.sort(err[:, m][mask[:, m]])
