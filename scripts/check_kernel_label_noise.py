@@ -52,11 +52,13 @@ def main() -> int:
         [KIND_NAMES[k] for k in kinds_train.tolist()], counts_train.tolist())))
 
     kernel_rows = load_kernel_rows(args.kernel_dir, "test", args.corrections)
-    kind_by_id = dict(zip(rows["sample_id"].tolist(), rows["model_kind"].tolist()))
+    test_rows = load_split_rows(args.dataset_dir, "test", args.cache_dir)
+    kind_by_id = dict(zip(test_rows["sample_id"].tolist(), test_rows["model_kind"].tolist()))
     kinds_test = np.array([kind_by_id[int(s)] for s in kernel_rows["sample_id"]])
 
     train_kernel_ids = load_kernel_rows(args.kernel_dir, "train", args.corrections)["sample_id"]
-    kinds_kernel_train = np.array([kind_by_id[int(s)] for s in train_kernel_ids])
+    kind_by_id_train = dict(zip(rows["sample_id"].tolist(), rows["model_kind"].tolist()))
+    kinds_kernel_train = np.array([kind_by_id_train[int(s)] for s in train_kernel_ids])
     kinds_k, counts_k = np.unique(kinds_kernel_train, return_counts=True)
     print("kernel-labelled train kinds:", dict(zip(
         [KIND_NAMES[k] for k in kinds_k.tolist()], counts_k.tolist())))
