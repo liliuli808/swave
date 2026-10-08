@@ -22,6 +22,8 @@ KERNEL_BATCH_SIZE=${KERNEL_BATCH_SIZE:-2048}
 LEARNING_RATE=${LEARNING_RATE:-2e-4}
 WARMUP_STEPS=${WARMUP_STEPS:-300}
 KERNEL_WEIGHT=${KERNEL_WEIGHT:-1.0}
+# >0 resamples kernel-labelled models in proportion to their worst kernel row.
+KERNEL_HARD_POWER=${KERNEL_HARD_POWER:-0}
 # 256/4 fine-tunes the base checkpoint; any other size trains from scratch.
 WIDTH=${WIDTH:-256}
 BLOCKS=${BLOCKS:-4}
@@ -66,6 +68,7 @@ mkdir -p "$(dirname "$OUTPUT_DIR")"
   --kernel-batch-size "$KERNEL_BATCH_SIZE" --learning-rate "$LEARNING_RATE" \
   --warmup-steps "$WARMUP_STEPS" --kernel-weight "$KERNEL_WEIGHT" \
   --width "$WIDTH" --blocks "$BLOCKS" \
+  --kernel-hard-example-power "$KERNEL_HARD_POWER" \
   2>&1 | tee -a "$OUTPUT_DIR.log"
 [ -f "$OUTPUT_DIR/best.pt" ] || [ -f "$OUTPUT_DIR/last.pt" ] || fail "fine-tuning produced no checkpoint"
 final="$OUTPUT_DIR/best.pt"

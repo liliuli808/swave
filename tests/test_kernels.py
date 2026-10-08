@@ -85,3 +85,23 @@ def test_model_from_checkpoint_honours_architecture() -> None:
     torch.testing.assert_close(loaded(value), model(value))
     default = FourHeadForwardModel()
     assert isinstance(model_from_checkpoint({"model": default.state_dict()}), FourHeadForwardModel)
+
+
+def test_kernel_loss_reports_worst_row_per_sample() -> None:
+    from swave.kernel_training import kernel_loss
+
+    def forward(vs: torch.Tensor) -> torch.Tensor:
+        return torch.stack([vs[:, :1].expand(-1, 3)] * 4, dim=1)
+
+    vs = torch.rand(5, 20)
+    kernel = torch.zeros(5, 4, 3, 20)
+    kernel[..., 0] = 1.0
+    mask = torch.ones(5, 4, 3, dtype=torch.bool)
+    _, loss, worst = kernel_loss(forward, vs, kernel, mask, 4)
+    assert float(loss) == 0.0
+    assert torch.all(worst == 0)
+    kernel[0, 3, 1, 0] = 0.5  # network row is 2x the label: 100 % error
+    torch.manual_seed(0)
+    _, _, worst = kernel_loss(forward, vs, kernel, mask, 256)
+    assert 70.0 < float(worst[0]) < 130.0
+    assert torch.all(worst[1:] == 0)

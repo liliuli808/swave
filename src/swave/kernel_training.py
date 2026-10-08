@@ -59,6 +59,7 @@ class KernelTrainingConfig:
     final_learning_rate: float = 1e-6
     weight_decay: float = 0.0
     hard_example_power: float = 1.0
+    kernel_hard_example_power: float = 0.0
     threads: int = 6
     device: str = "cpu"
     seed: int = 20261007
@@ -243,8 +244,9 @@ def kernel_loss(
     mask: Tensor,
     directions: int,
     generator: torch.Generator | None = None,
-) -> tuple[Tensor, Tensor]:
-    """Return (value prediction, mode-balanced relative JVP error in percent^2)."""
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Return value prediction, mode-balanced relative JVP error (percent^2),
+    and each sample's worst kernel-row error estimate in percent."""
     batch = vs.shape[0]
     tangent = torch.randn(
         (directions, batch, vs.shape[1]), generator=generator, dtype=vs.dtype
@@ -258,7 +260,10 @@ def kernel_loss(
     maskf = mask.to(error.dtype)
     per_mode = (error * maskf).sum(dim=(0, 2)) / maskf.sum(dim=(0, 2)).clamp_min(1)
     present = maskf.sum(dim=(0, 2)) > 0
-    return prediction[:batch], per_mode[present].mean()
+    worst = torch.sqrt(
+        torch.where(mask, error, torch.zeros_like(error)).detach().amax(dim=(1, 2))
+    )
+    return prediction[:batch], per_mode[present].mean(), worst
 
 
 def full_jacobian(forward: callable, vs: Tensor) -> Tensor:
@@ -483,6 +488,7 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
 
     # Per-sample hard-example weights from the latest relative error.
     sample_weight = torch.ones(len(train_vs), device=device)
+    kernel_weight = torch.ones(len(kernel_vs), device=device)
     for epoch in range(start_epoch, config.epochs):
         model.train()
         started = time.time()
@@ -494,15 +500,20 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
         kernel_total = 0.0
         for step in range(steps_per_epoch):
             index = order[step * config.batch_size : (step + 1) * config.batch_size]
-            kernel_index = torch.as_tensor(
-                rng.integers(0, len(kernel_vs), config.kernel_batch_size),
-                device=device,
-            )
+            if config.kernel_hard_example_power > 0:
+                kernel_index = torch.multinomial(
+                    kernel_weight, config.kernel_batch_size, replacement=True
+                )
+            else:
+                kernel_index = torch.as_tensor(
+                    rng.integers(0, len(kernel_vs), config.kernel_batch_size),
+                    device=device,
+                )
             prediction = forward(train_vs[index])
             value = relative_value_loss(
                 prediction, train_target[index], train_mask[index]
             )
-            kernel_prediction, derivative = kernel_loss(
+            kernel_prediction, derivative, worst_row = kernel_loss(
                 forward,
                 kernel_vs[kernel_index],
                 kernel_labels[kernel_index].to(torch.float32),
@@ -522,6 +533,11 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
             scheduler.step()
             value_total += float(value.detach())
             kernel_total += float(derivative.detach())
+            if config.kernel_hard_example_power > 0:
+                # Weight 1 for a perfect sample, 2 at a 5 % worst row; capped.
+                kernel_weight[kernel_index] = (
+                    (1.0 + worst_row / 5.0) ** config.kernel_hard_example_power
+                ).clamp(max=100.0)
             if config.hard_example_power > 0:
                 with torch.no_grad():
                     relative = torch.where(

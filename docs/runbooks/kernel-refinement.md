@@ -141,6 +141,31 @@ prints `score 2.0` because training starts from random weights; that is
 expected. The wide checkpoint loads through `ForwardPredictor` and the inversion
 loader without changes (architecture is stored in the checkpoint).
 
+### Result of the wide run (2026-10-08, width 512, 6 blocks, 300 epochs)
+
+| mode | curves ≤ 1 % | kernel rows ≤ 5 % | kernel median |
+| --- | --- | --- | --- |
+| M0 | 99.97 % | 99.42 % | 0.19 % |
+| M1 | 99.92 % | 98.50 % | 0.24 % |
+| M2 | 99.85 % | 97.09 % | 0.30 % |
+| M3 | 99.73 % | 94.99 % | 0.38 % |
+
+Overall: curves 99.608 % (PASS), kernel rows ≤ 5 % 97.505 % (not yet).
+Validation `kernel_rows_within_5pct` was still rising when the learning rate
+reached its floor, so the run was under-trained rather than capacity-bound.
+Kernel-labelled models used to be drawn uniformly; `KERNEL_HARD_POWER=1` now
+resamples them in proportion to their worst kernel row. **Next run:**
+
+```bash
+OUTPUT_DIR=runs/kernel-wide-hard RESULTS_DIR=results/forward-kernel-wide-hard \
+WIDTH=512 BLOCKS=6 EPOCHS=500 LEARNING_RATE=1e-3 WARMUP_STEPS=2000 \
+KERNEL_WEIGHT=3 KERNEL_HARD_POWER=1 \
+nohup bash scripts/run_kernel_refinement.sh > kernel-wide-hard.out 2>&1 &
+```
+
+Always use a new `OUTPUT_DIR` when changing settings: training resumes from
+`OUTPUT_DIR/last.pt` without checking that the settings match.
+
 ### Further knobs (one change at a time, fresh `OUTPUT_DIR` each run)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.
