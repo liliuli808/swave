@@ -43,8 +43,9 @@ def main() -> int:
     args = parser.parse_args()
 
     payload = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    model = Normalizer.from_payload(payload).physical(model_from_checkpoint(payload))
+    model = model_from_checkpoint(payload)
     model.eval()
+    forward = Normalizer.from_payload(payload).physical(model)
 
     rows = load_split_rows(args.dataset_dir, "test", args.cache_dir)
     apply_corrections(rows, args.corrections)
@@ -53,7 +54,7 @@ def main() -> int:
 
     physical = kernel_rows["kernel"].astype(np.float32)
     mask = kernel_rows["kernel_mask"]
-    network = network_kernels(model, kernel_rows["vs"].astype(np.float32))
+    network = network_kernels(forward, kernel_rows["vs"].astype(np.float32))
 
     norm_phys = np.linalg.norm(physical, axis=-1)
     err = np.linalg.norm(network - physical, axis=-1) / np.maximum(norm_phys, 1e-12)
