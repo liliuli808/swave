@@ -192,6 +192,46 @@ norm (a near-zero denominator near mode-kissing frequencies inflates the
 relative error). Decide based on its output: fix labels/augment data for the
 affected kinds, or exempt small-norm rows from the 5 % relative threshold.
 
+### Diagnosis of the 768 run's failing rows (2026-10-08)
+
+`scripts/diag_kernel_failures.py` on the width-768 checkpoint showed the
+>5 % rows are not a denominator artifact (failing rows have normal kernel
+norms) and not frequency-localized; they track the model kind:
+
+| mode | normal | low velocity | high velocity | coupled HVL+LVL |
+| --- | --- | --- | --- | --- |
+| M0 | 0.01 % | 1.49 % | 0.05 % | 0.49 % |
+| M1 | 0.01 % | 3.54 % | 0.07 % | 1.63 % |
+| M2 | 0.03 % | 6.22 % | 0.16 % | 3.71 % |
+| M3 | 0.13 % | 9.93 % | 0.58 % | 6.82 % |
+
+`scripts/check_kernel_label_noise.py` (finite-difference step sweep
+1e-6/1e-5/1e-4) rules out label noise: drift medians are 0.02–0.06 % with
+p95 ≤ 3.4 %, so the 5 % target is physically reachable. Kernel-labelled
+training models are also kind-balanced (LVL 15 %, matching the train split).
+The remaining cause is approximation capacity: thin anomalous zones (LVL and
+coupled kinds) produce sharp, high-amplitude sensitivity kernels that one
+shared MLP fits poorly. The hybrid inverter consumes the network Jacobian
+(`torch.func.jacfwd`), so these rows are inversion sensitivities and matter.
+
+**Next run: profile-feature conditioning.** `PROFILE_FEATURES=1` appends
+anomaly-localizing features (per-layer deficit vs running maximum, excess vs
+future minimum, anomaly depths and contrasts — 46 dims) computed inside the
+network, so the vs-only interface (inversion, evaluation) is unchanged and
+the features flow through the Jacobian. Fresh training, 512×6:
+
+```bash
+OUTPUT_DIR=runs/kernel-wide-pf RESULTS_DIR=results/forward-kernel-wide-pf \
+WIDTH=512 BLOCKS=6 EPOCHS=500 LEARNING_RATE=1e-3 WARMUP_STEPS=2000 \
+KERNEL_WEIGHT=3 KERNEL_HARD_POWER=1 PROFILE_FEATURES=1 \
+nohup bash scripts/run_kernel_refinement.sh > kernel-wide-pf.out 2>&1 &
+```
+
+A separate smaller issue: M3 rows at 0.5 Hz fail at 96 % — mode 3's kernel is
+pathological near its cut-off frequency. Consider a cut-off-aware validity
+mask in the kernel dataset builder if it remains material after the run
+above.
+
 ### Further knobs (one change at a time, fresh `OUTPUT_DIR` each run)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.

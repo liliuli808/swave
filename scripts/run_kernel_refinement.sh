@@ -24,6 +24,9 @@ WARMUP_STEPS=${WARMUP_STEPS:-300}
 KERNEL_WEIGHT=${KERNEL_WEIGHT:-1.0}
 # >0 resamples kernel-labelled models in proportion to their worst kernel row.
 KERNEL_HARD_POWER=${KERNEL_HARD_POWER:-0}
+# 1 derives anomaly-localizing profile features inside the network (fresh
+# training; cannot fine-tune the 256x4 base checkpoint with this on).
+PROFILE_FEATURES=${PROFILE_FEATURES:-0}
 # 256/4 fine-tunes the base checkpoint; any other size trains from scratch.
 WIDTH=${WIDTH:-256}
 BLOCKS=${BLOCKS:-4}
@@ -59,6 +62,10 @@ done
 
 log "stage 2: Sobolev fine-tuning on $DEVICE -> $OUTPUT_DIR"
 mkdir -p "$(dirname "$OUTPUT_DIR")"
+extra_args=()
+if [ "${PROFILE_FEATURES:-0}" = "1" ]; then
+  extra_args+=(--profile-features)
+fi
 "$PYTHON" scripts/finetune_forward_kernels.py \
   --base-checkpoint "$BASE_CHECKPOINT" \
   --dataset-dir "$DATASET_DIR" --kernel-dir "$KERNEL_DIR" \
@@ -69,6 +76,7 @@ mkdir -p "$(dirname "$OUTPUT_DIR")"
   --warmup-steps "$WARMUP_STEPS" --kernel-weight "$KERNEL_WEIGHT" \
   --width "$WIDTH" --blocks "$BLOCKS" \
   --kernel-hard-example-power "$KERNEL_HARD_POWER" \
+  "${extra_args[@]}" \
   2>&1 | tee -a "$OUTPUT_DIR.log"
 [ -f "$OUTPUT_DIR/best.pt" ] || [ -f "$OUTPUT_DIR/last.pt" ] || fail "fine-tuning produced no checkpoint"
 final="$OUTPUT_DIR/best.pt"

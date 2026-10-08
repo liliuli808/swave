@@ -21,6 +21,8 @@ def main() -> int:
         name = "--" + item.name.replace("_", "-")
         if item.type in {"Path", Path}:
             parser.add_argument(name, type=Path, required=True)
+        elif item.type in {bool, "bool"}:
+            parser.add_argument(name, action="store_true")
         elif item.name == "corrections":
             parser.add_argument(name, type=Path, default=None)
         elif item.name == "steps_per_epoch":

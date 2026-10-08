@@ -65,6 +65,7 @@ class KernelTrainingConfig:
     seed: int = 20261007
     width: int = 256
     blocks: int = 4
+    profile_features: bool = False
     steps_per_epoch: int | None = None
     corrections: Path | None = None
     kernel_train_split: Split = "train"
@@ -396,8 +397,12 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
     validate_checkpoint_split_policy(base)
     normalizer = Normalizer.from_payload(base)
     device = torch.device(config.device)
-    model = FourHeadForwardModel(width=config.width, blocks=config.blocks)
-    if (config.width, config.blocks) == (256, 4):
+    model = FourHeadForwardModel(
+        width=config.width,
+        blocks=config.blocks,
+        profile_features=config.profile_features,
+    )
+    if (config.width, config.blocks) == (256, 4) and not config.profile_features:
         model.load_state_dict(base["model"])
     model.to(device)
     forward = normalizer.physical(model)
@@ -570,7 +575,11 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
             "scheduler": scheduler.state_dict(),
             "epoch": epoch,
             "best_score": min(best_score, score),
-            "architecture": {"width": config.width, "blocks": config.blocks},
+            "architecture": {
+                "width": config.width,
+                "blocks": config.blocks,
+                "profile_features": config.profile_features,
+            },
             "kernel_training_config": config.to_dict(),
             "base_checkpoint": str(config.base_checkpoint),
         }
