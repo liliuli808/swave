@@ -16,6 +16,7 @@ Usage (on the GPU machine, from the repo root):
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -35,11 +36,12 @@ THRESHOLD = 0.05
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--dataset-dir", default="data/production")
-    parser.add_argument("--kernel-dir", default="data/kernels")
-    parser.add_argument("--cache-dir", default="data/cache")
-    parser.add_argument("--corrections", default="results/kissing-repair/corrections.npz")
+
+    parser.add_argument("--checkpoint", required=True, type=Path)
+    parser.add_argument("--dataset-dir", default="data/production", type=Path)
+    parser.add_argument("--kernel-dir", default="data/kernels", type=Path)
+    parser.add_argument("--cache-dir", default="data/cache", type=Path)
+    parser.add_argument("--corrections", default="results/kissing-repair/corrections.npz", type=Path)
     args = parser.parse_args()
 
     payload = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
