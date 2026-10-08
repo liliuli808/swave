@@ -166,6 +166,32 @@ nohup bash scripts/run_kernel_refinement.sh > kernel-wide-hard.out 2>&1 &
 Always use a new `OUTPUT_DIR` when changing settings: training resumes from
 `OUTPUT_DIR/last.pt` without checking that the settings match.
 
+### Results of the kw3 and width-768 runs (2026-10-08)
+
+| model | curves ≤ 1 % | points ≤ 1 % | max rel | kernel rows ≤ 5 % | kernel median |
+| --- | --- | --- | --- | --- | --- |
+| base | 96.674 % | 99.9755 % | 6.438 % | 92.129 % | 0.740 % |
+| kw3 finetuned (512×6, w=3, hard) | 99.584 % | 99.9974 % | 5.729 % | 97.562 % | 0.232 % |
+| 768×8 finetuned (w=3, hard) | 99.562 % | 99.9970 % | 4.546 % | 97.583 % | 0.176 % |
+
+Loss reweighting (`KERNEL_WEIGHT=3` + hard mining), double capacity, and more
+epochs each moved kernel rows ≤ 5 % by ≤ 0.06 pt; validation plateaued at
+~0.9747 with the learning rate at its floor in both runs. The remaining >5 %
+rows are a hard tail, not an overall-fit problem (median 0.18 %). **Stop tuning
+the network; diagnose the failing rows first:**
+
+```bash
+python3 scripts/diag_kernel_failures.py \
+    --checkpoint runs/kernel-wide-768/best.pt \
+    --dataset-dir data/production --kernel-dir data/kernels \
+    --cache-dir data/cache --corrections results/kissing-repair/corrections.npz
+```
+
+It reports the failing rows by mode, frequency, model kind, and physical-kernel
+norm (a near-zero denominator near mode-kissing frequencies inflates the
+relative error). Decide based on its output: fix labels/augment data for the
+affected kinds, or exempt small-norm rows from the 5 % relative threshold.
+
 ### Further knobs (one change at a time, fresh `OUTPUT_DIR` each run)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.
