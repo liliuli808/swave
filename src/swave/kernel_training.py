@@ -247,17 +247,29 @@ def kernel_loss(
     generator: torch.Generator | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Return value prediction, mode-balanced relative JVP error (percent^2),
-    and each sample's worst kernel-row error estimate in percent."""
-    batch = vs.shape[0]
-    tangent = torch.randn(
-        (directions, batch, vs.shape[1]), generator=generator, dtype=vs.dtype
-    ).to(vs.device)
-    repeated = vs.unsqueeze(0).expand(directions, -1, -1).reshape(-1, vs.shape[1])
-    prediction, product = jvp(forward, (repeated,), (tangent.reshape(-1, vs.shape[1]),))
+    and each sample's worst kernel-row error estimate in percent.
+
+    ``directions <= 0`` uses the unit vectors of every layer instead of random
+    directions, i.e. the exact Frobenius error of the full Jacobian."""
+    batch, layers = vs.shape
+    exact = directions <= 0
+    if exact:
+        directions = layers
+        tangent = torch.eye(layers, dtype=vs.dtype, device=vs.device)
+        tangent = tangent[:, None, :].expand(-1, batch, -1)
+    else:
+        tangent = torch.randn(
+            (directions, batch, layers), generator=generator, dtype=vs.dtype
+        ).to(vs.device)
+    repeated = vs.unsqueeze(0).expand(directions, -1, -1).reshape(-1, layers)
+    prediction, product = jvp(forward, (repeated,), (tangent.reshape(-1, layers),))
     product = product.reshape(directions, batch, *product.shape[1:])
     reference = torch.einsum("bmfl,dbl->dbmf", kernel, tangent)
     row_norm2 = (kernel**2).sum(dim=-1) + KERNEL_FLOOR**2
-    error = ((product - reference) ** 2).mean(dim=0) / row_norm2 / KERNEL_SCALE**2
+    squared = (product - reference) ** 2
+    # Unit vectors sum to ||J - K||^2; Gaussian directions estimate it by the mean.
+    squared = squared.sum(dim=0) if exact else squared.mean(dim=0)
+    error = squared / row_norm2 / KERNEL_SCALE**2
     maskf = mask.to(error.dtype)
     per_mode = (error * maskf).sum(dim=(0, 2)) / maskf.sum(dim=(0, 2)).clamp_min(1)
     present = maskf.sum(dim=(0, 2)) > 0

@@ -232,6 +232,39 @@ pathological near its cut-off frequency. Consider a cut-off-aware validity
 mask in the kernel dataset builder if it remains material after the run
 above.
 
+### Result of the 2026-10-09 run and next step
+
+| model | curves ≤ 1 % | points ≤ 1 % | max rel | kernel rows ≤ 5 % | kernel median |
+| --- | --- | --- | --- | --- | --- |
+| finetuned | 99.066 % | 99.9945 % | 6.483 % | 96.547 % | 0.508 % |
+
+**Invalid run — not evidence about profile features.** The command was typed
+on one line with the `> ` continuation prompts copied in, so bash treated them
+as redirections: `WIDTH=512`, `KERNEL_WEIGHT=3` and `nohup` became empty files
+and the checkpoint stored `width 256, blocks 6, kernel_weight 1.0`. Rerun the
+profile-feature command above (with trailing `\`, or on one line without `>`)
+after `rm -rf runs/kernel-wide-pf 'WIDTH=512' 'KERNEL_WEIGHT=3' nohup`.
+
+Every run so far estimated the kernel error from `kernel_directions = 2` random
+Gaussian directions out of 20 layers. That estimate is unbiased but noisy for
+the sharp, few-layer kernels of LVL and coupled models — the rows that fail —
+and the hard-example weights are computed from the same noisy estimate.
+`KERNEL_DIRECTIONS=0` uses the 20 unit vectors instead, i.e. the exact
+`‖J − K‖_F` of every row. It costs 10× the JVPs per kernel sample, so the kernel
+batch is reduced to keep step cost and GPU memory near the previous runs.
+Fresh training, 512×6, without profile features (one change at a time):
+
+```bash
+OUTPUT_DIR=runs/kernel-wide-exact RESULTS_DIR=results/forward-kernel-wide-exact \
+WIDTH=512 BLOCKS=6 EPOCHS=500 LEARNING_RATE=1e-3 WARMUP_STEPS=2000 \
+KERNEL_WEIGHT=3 KERNEL_HARD_POWER=1 KERNEL_DIRECTIONS=0 KERNEL_BATCH_SIZE=512 \
+nohup bash scripts/run_kernel_refinement.sh > kernel-wide-exact.out 2>&1 &
+```
+
+Compare validation `kernel_rows_within_5pct` against the 512×6 run's history
+at the same epoch. If it is not clearly ahead by epoch ~30, the estimator noise
+was not the bottleneck: stop the run and return to the per-kind options above.
+
 ### Further knobs (one change at a time, fresh `OUTPUT_DIR` each run)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.

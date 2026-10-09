@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import torch
 from scipy.optimize import brentq
@@ -105,3 +107,25 @@ def test_kernel_loss_reports_worst_row_per_sample() -> None:
     _, _, worst = kernel_loss(forward, vs, kernel, mask, 256)
     assert 70.0 < float(worst[0]) < 130.0
     assert torch.all(worst[1:] == 0)
+
+
+def test_kernel_loss_exact_mode_uses_the_full_jacobian() -> None:
+    from swave.kernel_training import KERNEL_FLOOR, kernel_loss
+
+    def forward(vs: torch.Tensor) -> torch.Tensor:
+        return torch.stack([vs[:, :1].expand(-1, 3)] * 4, dim=1)
+
+    vs = torch.rand(5, 20)
+    kernel = torch.zeros(5, 4, 3, 20)
+    kernel[..., 0] = 1.0
+    mask = torch.ones(5, 4, 3, dtype=torch.bool)
+    kernel[0, 3, 1, 0] = 0.5  # network row is 2x the label
+    kernel[0, 3, 1, 7] = 0.5  # and misses a second layer entirely
+    prediction, loss, worst = kernel_loss(forward, vs, kernel, mask, 0)
+    # Deterministic: exact relative L2 error of the row, no sampling noise.
+    expected = 100.0 * math.sqrt(0.5) / math.sqrt(0.5 + KERNEL_FLOOR**2)
+    assert math.isclose(float(worst[0]), expected, rel_tol=1e-5)
+    assert torch.all(worst[1:] == 0)
+    torch.testing.assert_close(prediction, forward(vs))
+    # Mode 3 holds one bad row out of 15 cells; the other modes are exact.
+    assert math.isclose(float(loss), expected**2 / 15 / 4, rel_tol=1e-5)
