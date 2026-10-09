@@ -1,0 +1,371 @@
+nohup: ignoring input
+[2026-10-07 20:19:57] stage 0: preflight
+.........                                                                [100%]
+9 passed in 4.55s
+[2026-10-07 20:20:08] stage 1: physical sensitivity-kernel labels -> data/kernels
+kernels-00000.h5: 100 rows in 1.5 s
+kernels-00001.h5: 100 rows in 0.4 s
+kernels-00002.h5: 100 rows in 0.4 s
+kernels-00003.h5: 100 rows in 0.4 s
+kernels-00004.h5: 100 rows in 0.4 s
+kernels-00005.h5: 100 rows in 0.3 s
+kernels-00006.h5: 100 rows in 0.3 s
+kernels-00007.h5: 100 rows in 0.3 s
+kernels-00008.h5: 100 rows in 0.3 s
+kernels-00009.h5: 100 rows in 0.3 s
+kernels-00010.h5: 100 rows in 0.3 s
+kernels-00011.h5: 100 rows in 0.3 s
+kernels-00012.h5: 100 rows in 0.3 s
+kernels-00013.h5: 100 rows in 0.3 s
+kernels-00014.h5: 100 rows in 0.3 s
+kernels-00015.h5: 100 rows in 0.3 s
+kernels-00016.h5: 100 rows in 0.3 s
+kernels-00017.h5: 100 rows in 0.3 s
+kernels-00018.h5: 100 rows in 0.3 s
+kernels-00019.h5: 100 rows in 0.3 s
+kernels-00020.h5: 100 rows in 0.3 s
+kernels-00021.h5: 100 rows in 0.3 s
+kernels-00022.h5: 100 rows in 0.3 s
+kernels-00023.h5: 100 rows in 0.3 s
+kernels-00024.h5: 100 rows in 0.3 s
+kernels-00025.h5: 100 rows in 0.3 s
+kernels-00026.h5: 100 rows in 0.3 s
+kernels-00027.h5: 100 rows in 0.3 s
+kernels-00028.h5: 100 rows in 0.3 s
+kernels-00029.h5: 100 rows in 0.3 s
+kernels-00030.h5: 100 rows in 0.3 s
+kernels-00031.h5: 100 rows in 0.3 s
+kernels-00032.h5: 100 rows in 0.3 s
+kernels-00033.h5: 100 rows in 0.3 s
+kernels-00034.h5: 100 rows in 0.3 s
+kernels-00035.h5: 100 rows in 0.3 s
+kernels-00036.h5: 100 rows in 0.3 s
+kernels-00037.h5: 100 rows in 0.3 s
+kernels-00038.h5: 100 rows in 0.3 s
+kernels-00039.h5: 100 rows in 0.3 s
+kernels-00040.h5: 100 rows in 0.3 s
+kernels-00041.h5: 100 rows in 0.3 s
+kernels-00042.h5: 100 rows in 0.3 s
+kernels-00043.h5: 100 rows in 0.3 s
+kernels-00044.h5: 100 rows in 0.3 s
+kernels-00045.h5: 100 rows in 0.3 s
+kernels-00046.h5: 100 rows in 0.3 s
+kernels-00047.h5: 100 rows in 0.3 s
+kernels-00048.h5: 100 rows in 0.3 s
+kernels-00049.h5: 100 rows in 0.3 s
+kernels-00050.h5: 100 rows in 0.3 s
+kernels-00051.h5: 100 rows in 0.3 s
+kernels-00052.h5: 100 rows in 0.3 s
+kernels-00053.h5: 100 rows in 0.3 s
+kernels-00054.h5: 100 rows in 0.3 s
+kernels-00055.h5: 100 rows in 0.3 s
+kernels-00056.h5: 100 rows in 0.3 s
+kernels-00057.h5: 100 rows in 0.3 s
+kernels-00058.h5: 100 rows in 0.3 s
+kernels-00059.h5: 100 rows in 0.3 s
+kernels-00060.h5: 100 rows in 0.3 s
+kernels-00061.h5: 100 rows in 0.3 s
+kernels-00062.h5: 100 rows in 0.3 s
+kernels-00063.h5: 100 rows in 0.3 s
+kernels-00064.h5: 100 rows in 0.3 s
+kernels-00065.h5: 100 rows in 0.3 s
+kernels-00066.h5: 100 rows in 0.3 s
+kernels-00067.h5: 100 rows in 0.3 s
+kernels-00068.h5: 100 rows in 0.3 s
+kernels-00069.h5: 100 rows in 0.3 s
+kernels-00070.h5: 100 rows in 0.3 s
+kernels-00071.h5: 100 rows in 0.3 s
+kernels-00072.h5: 100 rows in 0.3 s
+kernels-00073.h5: 100 rows in 0.3 s
+kernels-00074.h5: 100 rows in 0.3 s
+kernels-00075.h5: 100 rows in 0.3 s
+kernels-00076.h5: 100 rows in 0.3 s
+kernels-00077.h5: 100 rows in 0.3 s
+kernels-00078.h5: 100 rows in 0.3 s
+kernels-00079.h5: 100 rows in 0.3 s
+kernels-00080.h5: 100 rows in 0.3 s
+kernels-00081.h5: 100 rows in 0.3 s
+kernels-00082.h5: 100 rows in 0.3 s
+kernels-00083.h5: 100 rows in 0.3 s
+kernels-00084.h5: 100 rows in 0.3 s
+kernels-00085.h5: 100 rows in 0.3 s
+kernels-00086.h5: 100 rows in 0.3 s
+kernels-00087.h5: 100 rows in 0.3 s
+kernels-00088.h5: 100 rows in 0.3 s
+kernels-00089.h5: 100 rows in 0.3 s
+kernels-00090.h5: 100 rows in 0.3 s
+kernels-00091.h5: 100 rows in 0.3 s
+kernels-00092.h5: 100 rows in 0.3 s
+kernels-00093.h5: 100 rows in 0.3 s
+kernels-00094.h5: 100 rows in 0.3 s
+kernels-00095.h5: 100 rows in 0.3 s
+kernels-00096.h5: 100 rows in 0.3 s
+kernels-00097.h5: 100 rows in 0.3 s
+kernels-00098.h5: 100 rows in 0.3 s
+kernels-00099.h5: 100 rows in 0.3 s
+kernels-00000.h5: 100 rows in 0.8 s
+kernels-00001.h5: 100 rows in 0.3 s
+kernels-00002.h5: 100 rows in 0.3 s
+kernels-00003.h5: 100 rows in 0.3 s
+kernels-00004.h5: 100 rows in 0.3 s
+kernels-00005.h5: 100 rows in 0.3 s
+kernels-00006.h5: 100 rows in 0.3 s
+kernels-00007.h5: 100 rows in 0.3 s
+kernels-00008.h5: 100 rows in 0.3 s
+kernels-00009.h5: 100 rows in 0.3 s
+kernels-00010.h5: 100 rows in 0.3 s
+kernels-00011.h5: 100 rows in 0.3 s
+kernels-00012.h5: 100 rows in 0.3 s
+kernels-00013.h5: 100 rows in 0.3 s
+kernels-00014.h5: 100 rows in 0.3 s
+kernels-00015.h5: 100 rows in 0.3 s
+kernels-00016.h5: 100 rows in 0.3 s
+kernels-00017.h5: 100 rows in 0.3 s
+kernels-00018.h5: 100 rows in 0.3 s
+kernels-00019.h5: 100 rows in 0.3 s
+kernels-00020.h5: 100 rows in 0.3 s
+kernels-00021.h5: 100 rows in 0.3 s
+kernels-00022.h5: 100 rows in 0.3 s
+kernels-00023.h5: 100 rows in 0.3 s
+kernels-00024.h5: 100 rows in 0.3 s
+kernels-00025.h5: 100 rows in 0.3 s
+kernels-00026.h5: 100 rows in 0.3 s
+kernels-00027.h5: 100 rows in 0.3 s
+kernels-00028.h5: 100 rows in 0.3 s
+kernels-00029.h5: 100 rows in 0.3 s
+kernels-00030.h5: 100 rows in 0.3 s
+kernels-00031.h5: 100 rows in 0.3 s
+kernels-00032.h5: 100 rows in 0.3 s
+kernels-00033.h5: 100 rows in 0.3 s
+kernels-00034.h5: 100 rows in 0.3 s
+kernels-00035.h5: 100 rows in 0.3 s
+kernels-00036.h5: 100 rows in 0.3 s
+kernels-00037.h5: 100 rows in 0.3 s
+kernels-00038.h5: 100 rows in 0.3 s
+kernels-00039.h5: 100 rows in 0.3 s
+kernels-00040.h5: 100 rows in 0.3 s
+kernels-00041.h5: 100 rows in 0.3 s
+kernels-00042.h5: 100 rows in 0.3 s
+kernels-00043.h5: 100 rows in 0.3 s
+kernels-00044.h5: 100 rows in 0.3 s
+kernels-00045.h5: 100 rows in 0.3 s
+kernels-00046.h5: 100 rows in 0.3 s
+kernels-00047.h5: 100 rows in 0.3 s
+kernels-00048.h5: 100 rows in 0.3 s
+kernels-00049.h5: 100 rows in 0.3 s
+kernels-00050.h5: 100 rows in 0.3 s
+kernels-00051.h5: 100 rows in 0.3 s
+kernels-00052.h5: 100 rows in 0.3 s
+kernels-00053.h5: 100 rows in 0.3 s
+kernels-00054.h5: 100 rows in 0.3 s
+kernels-00055.h5: 100 rows in 0.3 s
+kernels-00056.h5: 100 rows in 0.3 s
+kernels-00057.h5: 100 rows in 0.3 s
+kernels-00058.h5: 100 rows in 0.3 s
+kernels-00059.h5: 100 rows in 0.3 s
+kernels-00060.h5: 100 rows in 0.3 s
+kernels-00061.h5: 100 rows in 0.3 s
+kernels-00062.h5: 100 rows in 0.3 s
+kernels-00063.h5: 100 rows in 0.3 s
+kernels-00064.h5: 100 rows in 0.3 s
+kernels-00065.h5: 100 rows in 0.3 s
+kernels-00066.h5: 100 rows in 0.3 s
+kernels-00067.h5: 100 rows in 0.3 s
+kernels-00068.h5: 100 rows in 0.3 s
+kernels-00069.h5: 100 rows in 0.3 s
+kernels-00070.h5: 100 rows in 0.3 s
+kernels-00071.h5: 100 rows in 0.3 s
+kernels-00072.h5: 100 rows in 0.3 s
+kernels-00073.h5: 100 rows in 0.3 s
+kernels-00074.h5: 100 rows in 0.3 s
+kernels-00075.h5: 100 rows in 0.3 s
+kernels-00076.h5: 100 rows in 0.3 s
+kernels-00077.h5: 100 rows in 0.3 s
+kernels-00078.h5: 100 rows in 0.3 s
+kernels-00079.h5: 100 rows in 0.3 s
+kernels-00080.h5: 100 rows in 0.3 s
+kernels-00081.h5: 100 rows in 0.3 s
+kernels-00082.h5: 100 rows in 0.3 s
+kernels-00083.h5: 100 rows in 0.3 s
+kernels-00084.h5: 100 rows in 0.3 s
+kernels-00085.h5: 100 rows in 0.3 s
+kernels-00086.h5: 100 rows in 0.3 s
+kernels-00087.h5: 100 rows in 0.3 s
+kernels-00088.h5: 100 rows in 0.3 s
+kernels-00089.h5: 100 rows in 0.3 s
+kernels-00090.h5: 100 rows in 0.3 s
+kernels-00091.h5: 100 rows in 0.3 s
+kernels-00092.h5: 100 rows in 0.3 s
+kernels-00093.h5: 100 rows in 0.3 s
+kernels-00094.h5: 100 rows in 0.3 s
+kernels-00095.h5: 100 rows in 0.3 s
+kernels-00096.h5: 100 rows in 0.3 s
+kernels-00097.h5: 100 rows in 0.3 s
+kernels-00098.h5: 100 rows in 0.3 s
+kernels-00099.h5: 100 rows in 0.3 s
+kernels-00000.h5: 2000 rows in 4.5 s
+kernels-00001.h5: 2000 rows in 4.0 s
+kernels-00002.h5: 2000 rows in 4.1 s
+kernels-00003.h5: 2000 rows in 4.0 s
+kernels-00004.h5: 2000 rows in 3.9 s
+kernels-00005.h5: 2000 rows in 4.1 s
+kernels-00006.h5: 2000 rows in 4.0 s
+kernels-00007.h5: 2000 rows in 4.1 s
+kernels-00008.h5: 2000 rows in 3.9 s
+kernels-00009.h5: 2000 rows in 4.1 s
+kernels-00010.h5: 2000 rows in 4.0 s
+kernels-00011.h5: 2000 rows in 4.0 s
+kernels-00012.h5: 2000 rows in 4.1 s
+kernels-00013.h5: 2000 rows in 3.9 s
+kernels-00014.h5: 2000 rows in 4.0 s
+kernels-00015.h5: 2000 rows in 4.1 s
+kernels-00016.h5: 2000 rows in 4.1 s
+kernels-00017.h5: 2000 rows in 3.9 s
+kernels-00018.h5: 2000 rows in 4.0 s
+kernels-00019.h5: 2000 rows in 4.2 s
+kernels-00020.h5: 2000 rows in 4.1 s
+kernels-00021.h5: 2000 rows in 4.1 s
+kernels-00022.h5: 2000 rows in 4.1 s
+kernels-00023.h5: 2000 rows in 4.0 s
+kernels-00024.h5: 2000 rows in 4.1 s
+kernels-00025.h5: 2000 rows in 4.0 s
+kernels-00026.h5: 2000 rows in 4.1 s
+kernels-00027.h5: 2000 rows in 4.0 s
+kernels-00028.h5: 2000 rows in 4.0 s
+kernels-00029.h5: 2000 rows in 4.0 s
+kernels-00030.h5: 2000 rows in 4.0 s
+kernels-00031.h5: 2000 rows in 3.9 s
+kernels-00032.h5: 2000 rows in 3.9 s
+kernels-00033.h5: 2000 rows in 4.0 s
+kernels-00034.h5: 2000 rows in 3.9 s
+kernels-00035.h5: 2000 rows in 4.0 s
+kernels-00036.h5: 2000 rows in 3.9 s
+kernels-00037.h5: 2000 rows in 3.9 s
+kernels-00038.h5: 2000 rows in 4.0 s
+kernels-00039.h5: 2000 rows in 4.0 s
+kernels-00040.h5: 2000 rows in 3.9 s
+kernels-00041.h5: 2000 rows in 4.0 s
+kernels-00042.h5: 2000 rows in 4.0 s
+kernels-00043.h5: 2000 rows in 4.1 s
+kernels-00044.h5: 2000 rows in 4.0 s
+kernels-00045.h5: 2000 rows in 3.9 s
+kernels-00046.h5: 2000 rows in 3.9 s
+kernels-00047.h5: 2000 rows in 3.9 s
+kernels-00048.h5: 2000 rows in 3.9 s
+kernels-00049.h5: 2000 rows in 4.0 s
+kernels-00050.h5: 2000 rows in 3.9 s
+kernels-00051.h5: 2000 rows in 4.0 s
+kernels-00052.h5: 2000 rows in 3.9 s
+kernels-00053.h5: 2000 rows in 4.1 s
+kernels-00054.h5: 2000 rows in 3.9 s
+kernels-00055.h5: 2000 rows in 3.9 s
+kernels-00056.h5: 2000 rows in 3.9 s
+kernels-00057.h5: 2000 rows in 3.9 s
+kernels-00058.h5: 2000 rows in 4.0 s
+kernels-00059.h5: 2000 rows in 3.9 s
+kernels-00060.h5: 2000 rows in 4.0 s
+kernels-00061.h5: 2000 rows in 3.9 s
+kernels-00062.h5: 2000 rows in 4.0 s
+kernels-00063.h5: 2000 rows in 4.3 s
+kernels-00064.h5: 2000 rows in 3.9 s
+kernels-00065.h5: 2000 rows in 3.9 s
+kernels-00066.h5: 2000 rows in 3.9 s
+kernels-00067.h5: 2000 rows in 4.0 s
+kernels-00068.h5: 2000 rows in 3.9 s
+kernels-00069.h5: 2000 rows in 4.0 s
+kernels-00070.h5: 2000 rows in 4.0 s
+kernels-00071.h5: 2000 rows in 4.0 s
+kernels-00072.h5: 2000 rows in 3.9 s
+kernels-00073.h5: 2000 rows in 4.0 s
+kernels-00074.h5: 2000 rows in 4.0 s
+kernels-00075.h5: 2000 rows in 4.0 s
+kernels-00076.h5: 2000 rows in 3.9 s
+kernels-00077.h5: 2000 rows in 4.3 s
+kernels-00078.h5: 2000 rows in 4.3 s
+kernels-00079.h5: 2000 rows in 4.0 s
+kernels-00080.h5: 2000 rows in 4.0 s
+kernels-00081.h5: 2000 rows in 4.0 s
+kernels-00082.h5: 2000 rows in 3.9 s
+kernels-00083.h5: 2000 rows in 4.0 s
+kernels-00084.h5: 2000 rows in 3.9 s
+kernels-00085.h5: 2000 rows in 3.9 s
+kernels-00086.h5: 2000 rows in 3.9 s
+kernels-00087.h5: 2000 rows in 4.1 s
+kernels-00088.h5: 2000 rows in 3.9 s
+kernels-00089.h5: 2000 rows in 3.9 s
+kernels-00090.h5: 2000 rows in 3.9 s
+kernels-00091.h5: 2000 rows in 4.0 s
+kernels-00092.h5: 2000 rows in 3.9 s
+kernels-00093.h5: 2000 rows in 4.1 s
+kernels-00094.h5: 2000 rows in 3.9 s
+kernels-00095.h5: 2000 rows in 4.0 s
+kernels-00096.h5: 2000 rows in 3.9 s
+kernels-00097.h5: 2000 rows in 4.0 s
+kernels-00098.h5: 2000 rows in 4.0 s
+kernels-00099.h5: 2000 rows in 4.0 s
+[2026-10-07 20:27:53] stage 2: Sobolev fine-tuning on cuda -> runs/kernel-finetune
+{"epoch": -1, "score": 0.11606742470743547}
+{"epoch": 0, "value_loss": 1.889443933355565, "kernel_loss": 70.43427905257867, "seconds": 18.97693395614624, "score": 0.17485078055148928, "samples_all_within_1pct": 0.909, "kernel_rows_within_5pct": 0.9161492194485107, "kernel_median": 0.008609119802713394}
+{"epoch": 1, "value_loss": 6.71303327959411, "kernel_loss": 71.86085636761723, "seconds": 17.265124797821045, "score": 0.16667126933104204, "samples_all_within_1pct": 0.9183, "kernel_rows_within_5pct": 0.915028730668958, "kernel_median": 0.00943850725889206}
+{"epoch": 2, "value_loss": 6.044743575611893, "kernel_loss": 72.62826668486304, "seconds": 18.91446828842163, "score": 0.18302685173562983, "samples_all_within_1pct": 0.9005, "kernel_rows_within_5pct": 0.9164731482643702, "kernel_median": 0.009471682831645012}
+{"epoch": 3, "value_loss": 6.895761707607581, "kernel_loss": 68.58240773726483, "seconds": 18.87606120109558, "score": 0.1760367382895347, "samples_all_within_1pct": 0.9082, "kernel_rows_within_5pct": 0.9157632617104653, "kernel_median": 0.009237328544259071}
+{"epoch": 4, "value_loss": 6.994862249919346, "kernel_loss": 67.26198118560168, "seconds": 18.918070793151855, "score": 0.16963279251910313, "samples_all_within_1pct": 0.9089, "kernel_rows_within_5pct": 0.9214672074808968, "kernel_median": 0.010385786183178425}
+{"epoch": 5, "value_loss": 5.830254750592368, "kernel_loss": 66.75816829837099, "seconds": 18.46322798728943, "score": 0.1784315727631629, "samples_all_within_1pct": 0.9028, "kernel_rows_within_5pct": 0.918768427236837, "kernel_median": 0.010102701373398304}
+{"epoch": 6, "value_loss": 5.668039807251522, "kernel_loss": 65.25741049708152, "seconds": 18.32952117919922, "score": 0.16261889787345218, "samples_all_within_1pct": 0.9151, "kernel_rows_within_5pct": 0.9222811021265478, "kernel_median": 0.008974476717412472}
+{"epoch": 7, "value_loss": 6.265515688730746, "kernel_loss": 62.066345370545676, "seconds": 18.354782342910767, "score": 0.17922057142212688, "samples_all_within_1pct": 0.9006, "kernel_rows_within_5pct": 0.9201794285778732, "kernel_median": 0.009571402333676815}
+{"epoch": 8, "value_loss": 5.5938681412716305, "kernel_loss": 61.27133548503019, "seconds": 18.655062437057495, "score": 0.17945668415937965, "samples_all_within_1pct": 0.9014, "kernel_rows_within_5pct": 0.9191433158406204, "kernel_median": 0.014523009769618511}
+{"epoch": 9, "value_loss": 5.58296703075876, "kernel_loss": 59.77933626758809, "seconds": 18.902294397354126, "score": 0.14738079229521428, "samples_all_within_1pct": 0.9264, "kernel_rows_within_5pct": 0.9262192077047857, "kernel_median": 0.010453169234097004}
+{"epoch": 10, "value_loss": 5.273837567592154, "kernel_loss": 58.4037071928686, "seconds": 18.52277374267578, "score": 0.16109675686897218, "samples_all_within_1pct": 0.9145, "kernel_rows_within_5pct": 0.9244032431310278, "kernel_median": 0.011270499788224697}
+{"epoch": 11, "value_loss": 5.01667578366338, "kernel_loss": 58.61522939253827, "seconds": 18.5363712310791, "score": 0.15508706713680553, "samples_all_within_1pct": 0.9182, "kernel_rows_within_5pct": 0.9267129328631944, "kernel_median": 0.009449560195207596}
+{"epoch": 12, "value_loss": 5.373919993030782, "kernel_loss": 58.14675743725835, "seconds": 18.53882884979248, "score": 0.1442983423867017, "samples_all_within_1pct": 0.9269, "kernel_rows_within_5pct": 0.9288016576132984, "kernel_median": 0.009983262978494167}
+{"epoch": 13, "value_loss": 5.555008080540871, "kernel_loss": 57.06126596489731, "seconds": 18.645619869232178, "score": 0.1502830442792521, "samples_all_within_1pct": 0.9192, "kernel_rows_within_5pct": 0.9305169557207479, "kernel_median": 0.009367632679641247}
+{"epoch": 14, "value_loss": 5.047116488826518, "kernel_loss": 56.21827545944525, "seconds": 18.46237874031067, "score": 0.15947546985864292, "samples_all_within_1pct": 0.913, "kernel_rows_within_5pct": 0.927524530141357, "kernel_median": 0.009319910779595375}
+{"epoch": 15, "value_loss": 5.006538303530946, "kernel_loss": 55.95903887067522, "seconds": 18.405211448669434, "score": 0.16243510026651542, "samples_all_within_1pct": 0.9088, "kernel_rows_within_5pct": 0.9287648997334845, "kernel_median": 0.008740161545574665}
+{"epoch": 16, "value_loss": 4.390819426701993, "kernel_loss": 53.63663449579356, "seconds": 18.902580976486206, "score": 0.16060504696132427, "samples_all_within_1pct": 0.9117, "kernel_rows_within_5pct": 0.9276949530386758, "kernel_median": 0.008544488810002804}
+{"epoch": 17, "value_loss": 4.483833978370744, "kernel_loss": 54.49642804204201, "seconds": 18.571786642074585, "score": 0.14698056594186115, "samples_all_within_1pct": 0.921, "kernel_rows_within_5pct": 0.9320194340581388, "kernel_median": 0.009304407984018326}
+{"epoch": 18, "value_loss": 4.356601915797409, "kernel_loss": 52.84343435326401, "seconds": 18.275258779525757, "score": 0.13451737302710953, "samples_all_within_1pct": 0.9331, "kernel_rows_within_5pct": 0.9323826269728904, "kernel_median": 0.008584701456129551}
+{"epoch": 19, "value_loss": 4.275728702545166, "kernel_loss": 52.07458782196045, "seconds": 18.066893815994263, "score": 0.15619420253048755, "samples_all_within_1pct": 0.913, "kernel_rows_within_5pct": 0.9308057974695124, "kernel_median": 0.00846894085407257}
+{"epoch": 20, "value_loss": 4.079442741919537, "kernel_loss": 51.11899572489213, "seconds": 18.78667449951172, "score": 0.13058325968878182, "samples_all_within_1pct": 0.9363, "kernel_rows_within_5pct": 0.9331167403112182, "kernel_median": 0.008233009837567806}
+{"epoch": 21, "value_loss": 4.378685636179788, "kernel_loss": 49.924905913216726, "seconds": 17.44172978401184, "score": 0.12885410302523614, "samples_all_within_1pct": 0.9403, "kernel_rows_within_5pct": 0.9308458969747638, "kernel_median": 0.008961103856563568}
+{"epoch": 22, "value_loss": 3.722774459391224, "kernel_loss": 50.43866173101931, "seconds": 18.21283221244812, "score": 0.13179670327765414, "samples_all_within_1pct": 0.9332, "kernel_rows_within_5pct": 0.9350032967223458, "kernel_median": 0.008117640390992165}
+{"epoch": 23, "value_loss": 3.2537756270291855, "kernel_loss": 48.44742352621896, "seconds": 18.4771511554718, "score": 0.13385578039589496, "samples_all_within_1pct": 0.9327, "kernel_rows_within_5pct": 0.9334442196041051, "kernel_median": 0.008588176220655441}
+{"epoch": 24, "value_loss": 4.125546769220001, "kernel_loss": 48.88102597606425, "seconds": 18.352480173110962, "score": 0.13657461421456452, "samples_all_within_1pct": 0.928, "kernel_rows_within_5pct": 0.9354253857854354, "kernel_median": 0.008754530921578407}
+{"epoch": 25, "value_loss": 3.375411464243519, "kernel_loss": 47.58059579498914, "seconds": 16.21974802017212, "score": 0.12191968624643357, "samples_all_within_1pct": 0.9426, "kernel_rows_within_5pct": 0.9354803137535664, "kernel_median": 0.008238895796239376}
+{"epoch": 26, "value_loss": 3.209242790329213, "kernel_loss": 46.48827766885563, "seconds": 17.037620306015015, "score": 0.1186089642861693, "samples_all_within_1pct": 0.9452, "kernel_rows_within_5pct": 0.9361910357138307, "kernel_median": 0.007689538411796093}
+{"epoch": 27, "value_loss": 2.8675050200248253, "kernel_loss": 45.99113320331184, "seconds": 18.49083137512207, "score": 0.12532333513433025, "samples_all_within_1pct": 0.9384, "kernel_rows_within_5pct": 0.9362766648656697, "kernel_median": 0.008524945937097073}
+{"epoch": 28, "value_loss": 2.7140408413750783, "kernel_loss": 45.38096544693927, "seconds": 18.2606840133667, "score": 0.11755418393434214, "samples_all_within_1pct": 0.945, "kernel_rows_within_5pct": 0.9374458160656579, "kernel_median": 0.007706562988460064}
+{"epoch": 29, "value_loss": 2.5968483759432424, "kernel_loss": 44.51557159423828, "seconds": 18.19887089729309, "score": 0.11402722075550387, "samples_all_within_1pct": 0.9474, "kernel_rows_within_5pct": 0.9385727792444961, "kernel_median": 0.007615044713020325}
+{"epoch": 30, "value_loss": 2.481865145722214, "kernel_loss": 44.14477709361485, "seconds": 18.681384563446045, "score": 0.11615028354736101, "samples_all_within_1pct": 0.945, "kernel_rows_within_5pct": 0.938849716452639, "kernel_median": 0.007737288251519203}
+{"epoch": 31, "value_loss": 2.449863772611229, "kernel_loss": 43.59332471964311, "seconds": 16.978779077529907, "score": 0.1139239283355008, "samples_all_within_1pct": 0.9471, "kernel_rows_within_5pct": 0.9389760716644991, "kernel_median": 0.007622977718710899}
+{"epoch": 32, "value_loss": 2.373256829320168, "kernel_loss": 42.9824246873661, "seconds": 17.575225591659546, "score": 0.11878175234420252, "samples_all_within_1pct": 0.9438, "kernel_rows_within_5pct": 0.9374182476557975, "kernel_median": 0.007912457920610905}
+{"epoch": 33, "value_loss": 2.4002356973229624, "kernel_loss": 42.146556776397084, "seconds": 18.10287833213806, "score": 0.11060840278867001, "samples_all_within_1pct": 0.9497, "kernel_rows_within_5pct": 0.93969159721133, "kernel_median": 0.007472173776477575}
+{"epoch": 34, "value_loss": 2.1343217942179464, "kernel_loss": 41.29071667729592, "seconds": 18.511536598205566, "score": 0.11126580635823602, "samples_all_within_1pct": 0.9485, "kernel_rows_within_5pct": 0.940234193641764, "kernel_median": 0.0075637600384652615}
+{"epoch": 35, "value_loss": 2.126868231564152, "kernel_loss": 41.356440845800904, "seconds": 18.32469892501831, "score": 0.10823515437996245, "samples_all_within_1pct": 0.9511, "kernel_rows_within_5pct": 0.9406648456200376, "kernel_median": 0.007435769308358431}
+{"epoch": 36, "value_loss": 1.9925854017539901, "kernel_loss": 41.149279711197835, "seconds": 18.563449144363403, "score": 0.1094694858637758, "samples_all_within_1pct": 0.9501, "kernel_rows_within_5pct": 0.9404305141362242, "kernel_median": 0.007434483617544174}
+{"epoch": 37, "value_loss": 1.891970223918253, "kernel_loss": 40.32322404822525, "seconds": 18.592706441879272, "score": 0.10555629759597196, "samples_all_within_1pct": 0.9534, "kernel_rows_within_5pct": 0.941043702404028, "kernel_median": 0.0073553938418626785}
+{"epoch": 38, "value_loss": 1.8329534354258556, "kernel_loss": 40.36981672170211, "seconds": 18.364943742752075, "score": 0.10754514863863218, "samples_all_within_1pct": 0.9512, "kernel_rows_within_5pct": 0.9412548513613678, "kernel_median": 0.00743860611692071}
+{"epoch": 39, "value_loss": 1.7873815590021562, "kernel_loss": 39.452356961308695, "seconds": 18.746880054473877, "score": 0.10580537771958709, "samples_all_within_1pct": 0.9532, "kernel_rows_within_5pct": 0.9409946222804129, "kernel_median": 0.007351625245064497}
+{"epoch": 40, "value_loss": 1.75890729561144, "kernel_loss": 38.58206481349711, "seconds": 17.00887393951416, "score": 0.10487956923941888, "samples_all_within_1pct": 0.9538, "kernel_rows_within_5pct": 0.9413204307605811, "kernel_median": 0.007300404366105795}
+{"epoch": 41, "value_loss": 1.7165959708544674, "kernel_loss": 39.06068658828735, "seconds": 18.93471884727478, "score": 0.10356842028207913, "samples_all_within_1pct": 0.9549, "kernel_rows_within_5pct": 0.9415315797179209, "kernel_median": 0.007287727668881416}
+{"epoch": 42, "value_loss": 1.6912689890180315, "kernel_loss": 38.74825914538636, "seconds": 18.601974725723267, "score": 0.1033530051759689, "samples_all_within_1pct": 0.9552, "kernel_rows_within_5pct": 0.941446994824031, "kernel_median": 0.007276687305420637}
+{"epoch": 43, "value_loss": 1.6717899532950655, "kernel_loss": 38.47267443793161, "seconds": 19.336124420166016, "score": 0.10240560515896846, "samples_all_within_1pct": 0.9556, "kernel_rows_within_5pct": 0.9419943948410315, "kernel_median": 0.007241022773087025}
+{"epoch": 44, "value_loss": 1.6517273868833269, "kernel_loss": 38.21264022710372, "seconds": 18.910143852233887, "score": 0.10287373068879879, "samples_all_within_1pct": 0.9553, "kernel_rows_within_5pct": 0.9418262693112012, "kernel_median": 0.007248760666698217}
+{"epoch": 45, "value_loss": 1.6209006400740877, "kernel_loss": 37.873206537597035, "seconds": 18.32314443588257, "score": 0.10265597830366147, "samples_all_within_1pct": 0.9555, "kernel_rows_within_5pct": 0.9418440216963385, "kernel_median": 0.007220054976642132}
+{"epoch": 46, "value_loss": 1.6136053551216514, "kernel_loss": 37.44027635029384, "seconds": 17.71802306175232, "score": 0.10299311397511624, "samples_all_within_1pct": 0.9551, "kernel_rows_within_5pct": 0.9419068860248838, "kernel_median": 0.007216515019536018}
+{"epoch": 47, "value_loss": 1.6012814780887292, "kernel_loss": 38.4373918844729, "seconds": 18.69062638282776, "score": 0.10295242782663394, "samples_all_within_1pct": 0.9552, "kernel_rows_within_5pct": 0.941847572173366, "kernel_median": 0.0072107804007828236}
+{"epoch": 48, "value_loss": 1.6062680099691664, "kernel_loss": 37.887507526242004, "seconds": 18.815996408462524, "score": 0.10251040874553496, "samples_all_within_1pct": 0.9555, "kernel_rows_within_5pct": 0.941989591254465, "kernel_median": 0.007206765469163656}
+{"epoch": 49, "value_loss": 1.6124906819693896, "kernel_loss": 37.80996778059979, "seconds": 18.054723978042603, "score": 0.10271082644871465, "samples_all_within_1pct": 0.9553, "kernel_rows_within_5pct": 0.9419891735512853, "kernel_median": 0.007205099333077669}
+runs/kernel-finetune/best.pt
+[2026-10-07 20:45:53] stage 3: evaluation and figures -> results/forward-kernel
+{"base": {"samples_all_within_1pct": 0.96674, "points_within_1pct": 0.9997545531825734, "max_relative_error": 0.06437602639198303, "kernel_rows_within_5pct": 0.9212895259744356, "kernel_median": 0.00740455836057663}}
+{"finetuned": {"samples_all_within_1pct": 0.95934, "points_within_1pct": 0.9997507102439752, "max_relative_error": 0.07133448123931885, "kernel_rows_within_5pct": 0.9434469619599111, "kernel_median": 0.007205538917332888}}
+/home/smbu/swave/scripts/evaluate_forward_kernels.py:255: UserWarning: Creating legend with loc="best" can be slow with large amounts of data.
+  figure.tight_layout()
+/home/smbu/swave/scripts/evaluate_forward_kernels.py:256: UserWarning: Creating legend with loc="best" can be slow with large amounts of data.
+  figure.savefig(output)
+[2026-10-07 20:47:57] stage 4: acceptance check
+model       curves<=1%  points<=1%  max rel  kernel<=5%  kernel med
+base          96.6740%    99.9755%   6.438%    92.1290%      0.740%
+finetuned     95.9340%    99.9751%   7.133%    94.3447%      0.721%
+ACCEPTANCE: NOT YET (see runbook: tuning)
+[2026-10-07 20:47:57] done. Report back: runs/kernel-finetune.log and results/forward-kernel/summary.json
