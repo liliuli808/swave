@@ -24,6 +24,9 @@ WARMUP_STEPS=${WARMUP_STEPS:-300}
 KERNEL_WEIGHT=${KERNEL_WEIGHT:-1.0}
 # >0 resamples kernel-labelled models in proportion to their worst kernel row.
 KERNEL_HARD_POWER=${KERNEL_HARD_POWER:-0}
+# Random Jacobian-vector directions per kernel sample; 0 uses the exact full
+# Jacobian (one JVP per layer, ~10x the kernel cost of the default 2).
+KERNEL_DIRECTIONS=${KERNEL_DIRECTIONS:-2}
 # 1 derives anomaly-localizing profile features inside the network (fresh
 # training; cannot fine-tune the 256x4 base checkpoint with this on).
 PROFILE_FEATURES=${PROFILE_FEATURES:-0}
@@ -76,6 +79,7 @@ fi
   --warmup-steps "$WARMUP_STEPS" --kernel-weight "$KERNEL_WEIGHT" \
   --width "$WIDTH" --blocks "$BLOCKS" \
   --kernel-hard-example-power "$KERNEL_HARD_POWER" \
+  --kernel-directions "$KERNEL_DIRECTIONS" \
   "${extra_args[@]}" \
   2>&1 | tee -a "$OUTPUT_DIR.log"
 [ -f "$OUTPUT_DIR/best.pt" ] || [ -f "$OUTPUT_DIR/last.pt" ] || fail "fine-tuning produced no checkpoint"
