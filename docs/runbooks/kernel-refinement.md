@@ -635,6 +635,65 @@ controlled experiment is fitting a fixed small set of difficult **training**
 models to test optimization/representation limits before expanding the full
 network or dataset. The v4 metrics alone do not justify either diagnosis.
 
+### 2026-10-10: the capacity plateau was never measured with correct gradients
+
+Every from-scratch run that defined the ~97.5% plateau (wide, kw3, 768×8,
+profile features, exact) finished before commit `cd8db0e`, i.e. it trained the
+kernel objective with the native-LayerNorm mixed-derivative defect (33–46%
+parameter-gradient errors in the reproduction). The only corrected-gradient
+runs (v2, v3, v4) are 50-epoch fine-tunes at `LEARNING_RATE=2e-5` starting from
+the kw3 weights, which can move only a short distance from the optimum found
+with incorrect gradients. "Width, epochs and loss weights do not help" is
+therefore not established; it is the next thing to test, not a conclusion.
+
+Local CPU checks on 200 deterministic production models (sample IDs 0–199,
+200 models: 45 normal, 35 LVL, 22 HVL, 98 coupled) also weaken the other
+explanations:
+
+* Production (`quadratic`) roots and `consensus` roots agree in every cell
+  (0 differing cells), so these models show no missed kissing pairs.
+* Re-solving after a random 0.01 km/s per-layer perturbation, the fraction of
+  rows whose physical kernel changes by more than 5% is similar across kinds
+  (M3: normal 28.7%, LVL 34.0%, HVL 33.6%, coupled 31.3%). Measured this way,
+  LVL kernels are only modestly less smooth, which does not explain a
+  ~70× higher M3 failure rate (9.93% vs 0.13%).
+* Rows within 0.1% of an adjacent mode (osculation) are sharp (54% change
+  >5%) but rare (0.2% of rows), far fewer than the 2.5% failing rows.
+
+This sample is small and does not prove the cause; it shows that the defective
+gradients are now the leading untested explanation.
+
+#### Next experiment: the kw3 recipe from scratch with corrected gradients
+
+The v4 numbers above already answer the train/validation question: training
+rows pass at 98.22% and validation at 97.59%, so the network does not fit its
+own training rows either. Labelling more training models is therefore not
+expected to reach 99% alone. What has not been run is full-strength training
+with correct gradients. All settings are kw3's, so the only change is the
+gradient fix (~23 s/epoch, about 3–4 h for 500 epochs, ~6 GB GPU):
+
+```bash
+OUTPUT_DIR=runs/kernel-wide-kw3-fixed RESULTS_DIR=results/forward-kernel-wide-kw3-fixed \
+WIDTH=512 BLOCKS=6 EPOCHS=500 LEARNING_RATE=1e-3 WARMUP_STEPS=2000 \
+KERNEL_WEIGHT=3 KERNEL_HARD_POWER=1 \
+nohup bash scripts/run_kernel_refinement.sh > kernel-wide-kw3-fixed.out 2>&1 &
+```
+
+Do not set `REQUIRE_WARM_START`: the 256×4 base checkpoint only supplies
+normalization, so epoch −1 prints score 2.0 as in the kw3 run. Compare
+validation `kernel_rows_within_5pct` with the kw3 history
+(`results/forward-kernel-wide-kw3/finetune-history.json`) at the same epoch:
+kw3 had 0.9585 at epoch 249, 0.9684 at 349 and 0.9742 at 449. Clearly ahead by
+epoch ~250 means the defect was the bottleneck: let it finish, and then warm
+start the v4 row objective from its `best-kernel.pt`. Behind or equal means it
+was not: stop it and follow the label audit and small-set fitting test in the
+previous section.
+
+The label audit of the previous section runs on CPU and needs no checkpoint,
+so run it at the same time. This GPU run does not depend on its outcome, but
+severe disagreements in the audited rows would take priority over any
+training change.
+
 ### Earlier tuning knobs (historical; validate corrected gradients first)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.
