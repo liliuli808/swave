@@ -9,3 +9,11 @@ dist/
 .worktrees/
 data/
 runs/
+
+# large data / model artifacts (kept locally, not in git)
+*.h5
+*.lock
+*.pt
+inversion/
+logs/
+papers/*.pdf

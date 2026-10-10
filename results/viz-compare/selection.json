@@ -1,0 +1,114 @@
+{
+  "air-hole": {
+    "image": "air-hole7-236.jpg",
+    "group": "air-hole7",
+    "final_conf": 0.88,
+    "baseline_conf": 0.84,
+    "rank": 1,
+    "confs": {
+      "baseline": 0.84,
+      "final": 0.88,
+      "yolo26n": 0.83,
+      "RT-DETR-L": 0.79,
+      "yolov9t": 0.84,
+      "yolov10n": 0.78,
+      "yolov5s": 0.8
+    }
+  },
+  "bite-edge": {
+    "image": "bite-edge2-32.jpg",
+    "group": "bite-edge2",
+    "final_conf": 0.87,
+    "baseline_conf": 0.72,
+    "rank": 2,
+    "confs": {
+      "baseline": 0.72,
+      "final": 0.87,
+      "yolo26n": 0.43,
+      "RT-DETR-L": 0.79,
+      "yolov9t": 0.96,
+      "yolov10n": 0.73,
+      "yolov5s": 0.79
+    }
+  },
+  "broken-arc": {
+    "image": "broken-arc2-145.jpg",
+    "group": "broken-arc2",
+    "final_conf": 0.62,
+    "baseline_conf": 0.49,
+    "rank": 1,
+    "confs": {
+      "baseline": 0.49,
+      "final": 0.62,
+      "yolo26n": 0.0,
+      "RT-DETR-L": 0.0,
+      "yolov9t": 0.0,
+      "yolov10n": 0.0,
+      "yolov5s": 0.0
+    }
+  },
+  "crack": {
+    "image": "crack057.jpg",
+    "group": "crack",
+    "final_conf": 0.86,
+    "baseline_conf": 0.85,
+    "rank": 3,
+    "confs": {
+      "baseline": 0.85,
+      "final": 0.86,
+      "yolo26n": 0.95,
+      "RT-DETR-L": 0.81,
+      "yolov9t": 0.89,
+      "yolov10n": 0.53,
+      "yolov5s": 0.81
+    }
+  },
+  "hollow-bead": {
+    "image": "air-hole4(hollow-bead)-089.jpg",
+    "group": "air-hole4(hollow-bead)",
+    "final_conf": 0.95,
+    "baseline_conf": 0.9,
+    "rank": 2,
+    "confs": {
+      "baseline": 0.9,
+      "final": 0.95,
+      "yolo26n": 0.0,
+      "RT-DETR-L": 0.84,
+      "yolov9t": 0.89,
+      "yolov10n": 0.96,
+      "yolov5s": 0.88
+    }
+  },
+  "overlap": {
+    "image": "overlap065.jpg",
+    "group": "overlap",
+    "final_conf": 0.94,
+    "baseline_conf": 0.92,
+    "rank": 1,
+    "confs": {
+      "baseline": 0.92,
+      "final": 0.94,
+      "yolo26n": 0.44,
+      "RT-DETR-L": 0.89,
+      "yolov9t": 0.89,
+      "yolov10n": 0.89,
+      "yolov5s": 0.87
+    }
+  },
+  "unfused": {
+    "image": "unfused44.jpg",
+    "group": "unfused",
+    "final_conf": 0.8,
+    "baseline_conf": 0.78,
+    "rank": 2,
+    "confs": {
+      "baseline": 0.78,
+      "final": 0.8,
+      "yolo26n": 0.48,
+      "RT-DETR-L": 0.85,
+      "yolov9t": 0.75,
+      "yolov10n": 0.63,
+      "yolov5s": 0.72
+    }
+  }
+}
