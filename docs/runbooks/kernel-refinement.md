@@ -777,6 +777,53 @@ regularization or weight decay (`weight_decay` is 0), and early stopping on
 validation kernel rate. Also compare the train/validation gap by model kind
 and mode before choosing.
 
+### v5 result and the train/validation gap by kind and mode
+
+v5 made no difference. Validation kernel rate stayed between 0.9796 and 0.9800
+for all 50 epochs, peaking at 0.98004 at epoch 46 (start 0.98005). Curves stayed
+at 99.8%. Training-pool pass rate fell to 99.48% after the first refresh and
+recovered to 99.61%. `runs/kernel-wide-kw3-fixed/best-kernel.pt` remains the
+best candidate.
+
+`scripts/diag_kernel_failures.py` on that checkpoint, both splits
+(`results/forward-kernel-wide-kw3-fixed/diagnostics-{train,validation}.json`),
+compared with the v4 reports:
+
+| rows within 5% | fixed train | fixed validation | v4 train | v4 validation |
+| --- | ---: | ---: | ---: | ---: |
+| all | 99.64% | 98.01% | 98.22% | 97.59% |
+| normal | 99.99% | 99.97% | 99.97% | 99.96% |
+| LVL | 99.39% | 95.76% | 96.56% | 95.09% |
+| HVL | 99.96% | 99.91% | 99.84% | 99.78% |
+| coupled | 99.47% | 97.33% | 97.53% | 96.73% |
+| M0 | 99.98% | 99.57% | 99.80% | 99.44% |
+| M1 | 99.91% | 98.77% | 99.19% | 98.49% |
+| M2 | 99.70% | 97.64% | 97.93% | 97.22% |
+| M3 | 98.95% | 96.03% | 95.94% | 95.19% |
+
+| rows with error >=20% | fixed | v4 |
+| --- | ---: | ---: |
+| train (95.76 M rows) | 2,080 | 225,355 |
+| validation (4.79 M rows) | 34,709 | 28,266 |
+
+Failed validation rows: 95,503 (v4: 115,380). Of these, 66% are coupled and 33%
+LVL. Normal and HVL models are essentially solved on both splits.
+
+The corrected gradients mostly improved the fit to training rows: training
+failures fall 5× and severe training errors 100×. On validation, failures fall
+only 17%, and severe errors rise. The network now memorizes LVL/coupled
+training models that it does not generalize to: validation has 0.72% of rows
+with error >=20% versus 0.002% on training. The gap is concentrated in exactly
+the model kinds and higher modes that were hard before. It is a
+generalization problem in those kinds, not capacity or optimization.
+
+Next: determine whether more data or regularization closes the gap. A cheap
+test is to train the kw3-fixed recipe on a fixed fraction (e.g. 50%) of
+kernel training models and compare the LVL/coupled validation rate. A clear
+drop from 50% to 100% means more labelled LVL/coupled kernel models are the
+direct route. A flat curve points to regularization (`weight_decay` is 0) or
+input representation of the low-velocity layers instead.
+
 ### Earlier tuning knobs (historical; validate corrected gradients first)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.
