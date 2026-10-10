@@ -694,6 +694,89 @@ so run it at the same time. This GPU run does not depend on its outcome, but
 severe disagreements in the audited rows would take priority over any
 training change.
 
+### 2026-10-10 results: labels agree, corrected gradients lift the plateau
+
+**Label audit** (`results/forward-kernel-corrected-rows-v4/label-audit-validation.json`,
+84 rows from 19 models). The 20 worst v4 validation rows (network relative L2
+193–350%, all coupled models, mostly M2/M3) and 64 random reference rows
+show no label problem:
+
+| check | worst rows: max relative L2 | reference rows: max relative L2 |
+| --- | ---: | ---: |
+| `stored_vs_recomputed` (float16 vs float64) | 0.033% | 0.048% |
+| `resolved_vs_stored` (consensus roots, tol 1e-11) | 0.032% | 0.048% |
+| `step_1e-6_at_stored_root` | 8.1e-8 | 0.034% |
+| `step_1e-4_at_stored_root` | 8.1e-6 | 3.4% (4 rows >1%, none >5%) |
+
+No row is unresolved, and the largest phase shift after re-searching roots is
+6.9e-8. The stored-label differences equal float16 rounding. The worst failures
+are network errors, not wrong roots, mode identities or derivative steps. These
+checks share one secular function, so this is not independent physical
+validation.
+
+**kw3 recipe from scratch with corrected gradients**
+(`runs/kernel-wide-kw3-fixed`, commit `f285dc9`, GPU 1, 3.5 h). Validation
+`kernel_rows_within_5pct` against the old kw3 run at the same epoch:
+
+| epoch | fixed | kw3 |
+| ---: | ---: | ---: |
+| 100 | 0.9544 | 0.9314 |
+| 249 | 0.9713 | 0.9585 |
+| 349 | 0.9774 | 0.9684 |
+| 449 | 0.9799 | 0.9742 |
+| 499 | 0.9801 | 0.9747 |
+
+It led at the epoch-249 check by 1.28 points and was allowed to finish.
+`best-kernel.pt` is epoch 493 (validation kernel 98.005%, curves 99.84%).
+Test acceptance:
+
+| model | curves<=1% | points<=1% | max rel | kernel<=5% | kernel med |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| kw3 | 99.5840% | 99.9974% | 5.729% | 97.5617% | 0.232% |
+| kw3-fixed | 99.8460% | 99.9991% | 3.644% | 98.1160% | 0.141% |
+
+Test kernel pass rate by mode: M0 99.61%, M1 98.87%, M2 97.77%, M3 96.20%.
+Acceptance is still NOT YET. The gradient defect was a real bottleneck: the same
+recipe gains about 0.55 points and beats every earlier candidate, including
+v4 (97.59% validation). The last 100 epochs add only 0.02 points (validation
+0.9790 → 0.9801, with the learning rate decayed), so a longer run with the
+same recipe is not expected to close the remaining gap.
+
+#### Next run: v5, the row objective warm-started from kw3-fixed
+
+This is the v4 recipe (`scripts/run_kernel_row_refinement.sh`, 50 epochs,
+`LEARNING_RATE=2e-5`, `KERNEL_ROW_WEIGHT=0.1`) with only the starting weights
+changed:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 PYTHON=.venv/bin/python \
+BASE_CHECKPOINT=runs/kernel-wide-kw3-fixed/best-kernel.pt \
+OUTPUT_DIR=runs/kernel-fixed-rows-v5 \
+setsid nohup bash scripts/run_kernel_row_refinement.sh > kernel-fixed-rows-v5.out 2>&1 < /dev/null &
+```
+
+The warm-start guard score (2 − curve rate − kernel rate) is about 0.02, under
+the script's 0.05 limit. Compare validation `kernel_rows_within_5pct` with
+the starting 0.98005: v4 added only 0.058 points to its own start.
+
+The first `kernel_row_mining` record of v5 changes the diagnosis. On a random
+pool of 8,192 training models (3.92 M rows), kw3-fixed already passes
+**99.65%** of rows (M0 99.98%, M1 99.92%, M2 99.71%, M3 99.00%). Validation is
+98.01%. v4's starting model passed 98.19% of the same pool. Once the gradients
+are correct, the network fits its training rows above the 99% target, and
+the remaining gap (~1.6 points) is between training and validation. The v5
+bank also shrinks from 130,510 to 50,189 rows (error >3%).
+
+The row objective trains only on training rows, so v5 is expected to widen
+this gap rather than close it. Still let it finish (50 epochs), because it costs
+little and confirms the effect. The small-set fitting test is no longer
+needed: capacity and optimization are not the limit on training rows. Next,
+look at generalization and data coverage. Options include more labelled kernel
+training models (only 200,000 of the production models have kernels),
+regularization or weight decay (`weight_decay` is 0), and early stopping on
+validation kernel rate. Also compare the train/validation gap by model kind
+and mode before choosing.
+
 ### Earlier tuning knobs (historical; validate corrected gradients first)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.
