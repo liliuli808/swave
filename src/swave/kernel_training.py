@@ -33,6 +33,7 @@ from numpy.typing import NDArray
 from torch import Tensor
 from torch.func import jvp
 
+from .kernel_mining import exact_row_kernel_loss, mine_kernel_rows
 from .kernels import sensitivity_kernels
 from .network import FourHeadForwardModel
 from .splits import Split, mask_for_split, validate_checkpoint_split_policy
@@ -61,6 +62,10 @@ class KernelTrainingConfig:
     max_grad_norm: float = 10.0
     hard_example_power: float = 1.0
     kernel_hard_example_power: float = 0.0
+    kernel_row_weight: float = 0.0
+    kernel_row_batch_size: int = 256
+    kernel_mining_samples: int = 8192
+    kernel_mining_interval: int = 5
     threads: int = 6
     device: str = "cpu"
     seed: int = 20261007
@@ -79,6 +84,13 @@ class KernelTrainingConfig:
         if (not math.isfinite(self.max_initial_score)
                 or not 0 <= self.max_initial_score <= 2):
             raise ValueError("max_initial_score must be finite and between 0 and 2")
+        if not math.isfinite(self.kernel_row_weight) or self.kernel_row_weight < 0:
+            raise ValueError("kernel_row_weight must be finite and nonnegative")
+        if min(self.kernel_row_batch_size, self.kernel_mining_samples,
+               self.kernel_mining_interval) < 1:
+            raise ValueError("kernel row batch, mining samples and interval must be positive")
+        if self.kernel_row_weight > 0 and self.kernel_train_split != "train":
+            raise ValueError("kernel row mining requires kernel_train_split='train'")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -425,6 +437,8 @@ def _save(path: Path, payload: dict[str, object]) -> None:
 
 
 def train_with_kernels(config: KernelTrainingConfig) -> Path:
+    if config.kernel_row_weight > 0 and config.kernel_train_split != "train":
+        raise ValueError("kernel row mining requires kernel_train_split='train'")
     torch.set_num_threads(config.threads)
     torch.manual_seed(config.seed)
     rng = np.random.default_rng(config.seed)
@@ -482,6 +496,10 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
     kernel_rows = load_kernel_rows(
         config.kernel_dir, config.kernel_train_split, config.corrections
     )
+    if config.kernel_row_weight > 0 and not mask_for_split(
+        kernel_rows["sample_id"], "train"
+    ).all():
+        raise ValueError("kernel row mining found non-training sample IDs")
     validation_rows = load_kernel_rows(
         config.kernel_dir, "validation", config.corrections
     )
@@ -648,7 +666,27 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
     # Per-sample hard-example weights from the latest relative error.
     sample_weight = torch.ones(len(train_vs), device=device)
     kernel_weight = torch.ones(len(kernel_vs), device=device)
+    row_bank = None
+    # Mining must not perturb either of the baseline batch RNG streams.
+    mining_rng = np.random.default_rng(config.seed + 104729 + start_epoch)
+    row_rng = np.random.default_rng(config.seed + 130363 + start_epoch)
     for epoch in range(start_epoch, config.epochs):
+        if config.kernel_row_weight > 0 and (
+            row_bank is None or epoch % config.kernel_mining_interval == 0
+        ):
+            mining_started = time.time()
+            model.eval()
+            pool = torch.as_tensor(mining_rng.choice(
+                len(kernel_vs), min(config.kernel_mining_samples, len(kernel_vs)),
+                replace=False,
+            ), device=device)
+            row_bank, mining_stats = mine_kernel_rows(
+                forward, kernel_vs, kernel_labels, kernel_mask, pool,
+            )
+            print(json.dumps({"kernel_row_mining": {
+                "epoch": epoch, "split": "train", **mining_stats,
+                "seconds": time.time() - mining_started,
+            }}), flush=True)
         model.train()
         started = time.time()
         order = torch.as_tensor(rng.permutation(len(train_vs)), device=device)
@@ -657,6 +695,9 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
             order = torch.multinomial(probability, len(train_vs), replacement=True)
         value_total = 0.0
         kernel_total = 0.0
+        row_total = 0.0
+        row_passed = 0
+        row_count = 0
         grad_norm_total = 0.0
         grad_norm_max = 0.0
         clipped_steps = 0
@@ -688,6 +729,21 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
                 kernel_value_mask[kernel_index],
             )
             loss = value + config.kernel_weight * derivative
+            if config.kernel_row_weight > 0 and len(row_bank):
+                selected = row_bank[torch.as_tensor(row_rng.integers(
+                    0, len(row_bank), config.kernel_row_batch_size,
+                ), device=device)]
+                row_models, row_modes, row_frequencies = selected.unbind(1)
+                row_loss, row_relative = exact_row_kernel_loss(
+                    forward, kernel_vs[row_models],
+                    kernel_labels[row_models, row_modes, row_frequencies],
+                    row_modes, row_frequencies,
+                    kernel_floor=KERNEL_FLOOR, percent_scale=KERNEL_SCALE,
+                )
+                loss = loss + config.kernel_row_weight * row_loss
+                row_total += float(row_loss.detach())
+                row_passed += int((row_relative < 0.05).sum())
+                row_count += len(row_relative)
             if not torch.isfinite(loss).item():
                 raise FloatingPointError(
                     f"non-finite training loss at epoch {epoch}, step {step}"
@@ -736,6 +792,12 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
             "score": score,
             "validation": metrics,
         }
+        if config.kernel_row_weight > 0:
+            record.update({
+                "kernel_row_loss": row_total / steps_per_epoch,
+                "mined_row_pass_fraction": row_passed / row_count if row_count else None,
+                "mined_rows": len(row_bank),
+            })
         history.append(record)
         payload = checkpoint(epoch, min(best_score, score), metrics)
         _save(last_path, payload)
@@ -759,6 +821,9 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
                     "kernel_rows_within_5pct": metrics["kernel"]["rows_within_5pct"],
                     "kernel_median": metrics["kernel"]["median_relative_l2"],
                 }
+                | {key: record[key] for key in (
+                    "kernel_row_loss", "mined_row_pass_fraction", "mined_rows",
+                ) if key in record}
             ),
             flush=True,
         )

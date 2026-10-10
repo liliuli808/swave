@@ -33,6 +33,7 @@ def kernel_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "split_policy": SPLIT_POLICY,
     }, base)
     rows = {
+        "sample_id": np.arange(4, dtype=np.uint64),
         "vs": np.random.default_rng(0).uniform(0.4, 2.0, (4, 20)).astype(np.float32),
         "phase_velocity": np.ones((4, 4, 120), dtype=np.float32),
         "valid_mask": np.ones((4, 4, 120), dtype=bool),
@@ -243,3 +244,43 @@ def test_kernel_selection_accepts_boundary_and_breaks_exact_ties_by_curves():
     assert kernel_checkpoint_key(_metrics(0.99, 0.97)) == (0.97, 0.99)
     assert (kernel_checkpoint_key(_metrics(0.995, 0.97))
             > kernel_checkpoint_key(_metrics(0.99, 0.97)))
+
+
+def test_row_mining_training_refreshes_its_pool_and_reports_the_extra_objective(
+    kernel_run, capsys: pytest.CaptureFixture
+):
+    config, state, _ = kernel_run
+    config.epochs = 3
+    config.kernel_row_weight = 0.1
+    config.kernel_row_batch_size = 2
+    config.kernel_mining_samples = 3
+    config.kernel_mining_interval = 2
+    train_with_kernels(config)
+    output = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    refreshes = [row["kernel_row_mining"] for row in output if "kernel_row_mining" in row]
+    assert [row["epoch"] for row in refreshes] == [0, 2]
+    assert all(row["split"] == "train" and row["pool_models"] == 3 for row in refreshes)
+    epochs = json.loads((config.output_dir / "history.json").read_text())["epochs"][1:]
+    assert all(row["mined_rows"] > 0 for row in epochs)
+    assert all(np.isfinite(row["kernel_row_loss"]) for row in epochs)
+    last = torch.load(config.output_dir / "last.pt", weights_only=False)
+    assert any(not torch.equal(last["model"][key], value) for key, value in state.items())
+
+
+def test_row_mining_refuses_validation_as_a_training_split(kernel_run):
+    config, _, _ = kernel_run
+    config.kernel_row_weight = 0.1
+    config.kernel_train_split = "validation"
+    with pytest.raises(ValueError, match="requires kernel_train_split='train'"):
+        train_with_kernels(config)
+    assert not config.output_dir.exists()
+
+
+def test_row_mining_checks_sample_ids_even_when_the_directory_is_named_train(kernel_run):
+    config, _, _ = kernel_run
+    config.kernel_row_weight = 0.1
+    rows = kernel_training.load_kernel_rows(None, None)
+    rows["sample_id"][0] = 80  # validation under the fixed split policy
+    with pytest.raises(ValueError, match="non-training sample IDs"):
+        train_with_kernels(config)
+    assert not config.output_dir.exists()

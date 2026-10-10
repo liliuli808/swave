@@ -494,6 +494,82 @@ flat, compare more directions at the same batch size; targeted row weighting
 or label checks should follow the observed failure groups. Do not relax the
 acceptance masks or thresholds to remove the remaining failures.
 
+### Weight-3 v3 result and exact training-row experiment
+
+The corrected weight-3 run did not improve the baseline. The user verified the
+stored best feasible kernel checkpoint, not just the final training epoch:
+
+| available checkpoint | validation curves within 1% | validation kernels within 5% |
+| --- | --- | --- |
+| weight-1 v2 `last.pt`, epoch 49 | 99.5300% | 97.5319% |
+| weight-3 v3 `best-kernel.pt`, epoch 46 | 99.4700% | 97.5220% |
+
+Keep v2 as the better available candidate. These observations concern this
+matched 50-epoch comparison; they do not show that kernel weighting can never
+help. Do not infer convergence to 99% merely from a falling mean training loss.
+
+The v2 validation diagnosis found 118,175 failing rows out of 4,788,089 valid
+rows. Low-velocity and coupled models accounted for 98.64% of failures; modes
+M2/M3 accounted for 78.63%. Physical kernel norms of failing rows were ordinary,
+with none below 1% of the modal median. About 48.86% of failures exceeded 10%
+relative error. This is not evidence to drop small-norm or cutoff rows from
+acceptance, and it does not certify all labels or establish a capacity limit.
+
+The next optional objective changes **which kernel rows receive updates**:
+
+1. Every five epochs, sample up to 8,192 models from the kernel **training**
+   split. Calculate exact row errors using all 20 layer directions, without a
+   parameter-gradient graph, and select valid rows with relative error >=3%.
+   The 3% mining threshold supplies margin below the unchanged 5% acceptance
+   threshold. Rotate the pool; do not collect training IDs from validation.
+2. Each optimizer step samples 256 selected (model, mode, frequency) rows.
+   A reverse derivative with `create_graph=True` computes each full 20-layer
+   kernel row exactly. This relies on the network having independent batch
+   elements. The new row objective is additional to the existing value loss
+   and uniformly sampled, two-direction kernel objective.
+3. Use twice pseudo-Huber loss of the row's relative error in percent, with
+   transition delta=5%. It matches squared error near zero and grows linearly
+   for large residuals, reducing their influence **in the extra row objective**.
+   The ordinary kernel objective remains squared error. Start the extra weight
+   at 0.1 as an experiment, not as a validated optimum.
+
+The derivative construction follows
+[PyTorch autograd.grad](https://docs.pytorch.org/docs/2.11/generated/torch.autograd.grad.html).
+The robust scalar loss is checked against
+[SciPy pseudo-Huber](https://docs.scipy.org/doc/scipy/reference/generated/scipy.special.pseudo_huber.html).
+Tests also compare selected rows to a full reverse Jacobian, parameter gradients
+to central differences, and an actual optimizer update to a known linear target.
+The implementation rejects non-training split IDs and excludes invalid rows.
+
+The dedicated recipe uses the same kw3 starting weights and baseline settings
+as v2, with the extra row objective enabled. It checks the relevant CPU/CUDA
+regressions first and runs training/validation, leaving test evaluation for a
+selected candidate:
+
+```bash
+git pull --ff-only
+nohup bash scripts/run_kernel_row_refinement.sh > kernel-corrected-rows-v4.out 2>&1 &
+tail -n 30 -f kernel-corrected-rows-v4.out
+```
+
+Default output is `runs/kernel-corrected-rows-v4`; a used directory is rejected
+by the fresh-warm-start guard. The default remains 50 epochs; mining adds work
+and its time is logged separately. The original `run_kernel_refinement.sh`
+also accepts `KERNEL_ROW_WEIGHT`, `KERNEL_ROW_BATCH_SIZE`,
+`KERNEL_MINING_SAMPLES`, and `KERNEL_MINING_INTERVAL`; its extra row objective
+defaults to zero so older experiments keep their original objective.
+
+Inspect `kernel_row_mining` records first: `pool_rows_within_5pct` measures a
+random training pool, and `selected_rows_by_mode` shows where extra updates go.
+If the training pool is already much better than validation, investigate
+generalization/data coverage instead of assuming insufficient optimization.
+Epoch records add `kernel_row_loss`, `mined_rows`, and
+`mined_row_pass_fraction`. The latter is a training-bank metric, not validation;
+it can drop when the bank is refreshed and newly difficult rows enter it.
+Judge improvement using the unchanged validation kernel rate and the >=99%
+curve constraint. This method has not yet been validated on the remote GPU
+run and is not a guarantee of reaching acceptance.
+
 ### Earlier tuning knobs (historical; validate corrected gradients first)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.

@@ -33,6 +33,11 @@ REQUIRE_WARM_START=${REQUIRE_WARM_START:-0}
 MAX_INITIAL_SCORE=${MAX_INITIAL_SCORE:-2.0}
 # >0 resamples kernel-labelled models in proportion to their worst kernel row.
 KERNEL_HARD_POWER=${KERNEL_HARD_POWER:-0}
+# Extra exact-row training, mined only from a rotating pool of training models.
+KERNEL_ROW_WEIGHT=${KERNEL_ROW_WEIGHT:-0}
+KERNEL_ROW_BATCH_SIZE=${KERNEL_ROW_BATCH_SIZE:-256}
+KERNEL_MINING_SAMPLES=${KERNEL_MINING_SAMPLES:-8192}
+KERNEL_MINING_INTERVAL=${KERNEL_MINING_INTERVAL:-5}
 # Random Jacobian-vector directions per kernel sample; 0 uses the exact full
 # Jacobian (one JVP per layer, ~10x the kernel cost of the default 2).
 KERNEL_DIRECTIONS=${KERNEL_DIRECTIONS:-2}
@@ -80,7 +85,8 @@ if [ "$DEVICE" = cuda ]; then
   "$PYTHON" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" \
     || fail "DEVICE=cuda but torch.cuda.is_available() is False (set DEVICE=cpu to run on CPU)"
 fi
-"$PYTHON" -m pytest -q tests/test_kernels.py tests/test_kernel_training.py tests/test_solver.py \
+"$PYTHON" -m pytest -q tests/test_kernels.py tests/test_kernel_training.py \
+  tests/test_kernel_mining.py tests/test_solver.py \
   || fail "kernel/solver tests failed"
 
 log "stage 1: physical sensitivity-kernel labels -> $KERNEL_DIR"
@@ -113,6 +119,10 @@ fi
   --max-initial-score "$MAX_INITIAL_SCORE" \
   --width "$WIDTH" --blocks "$BLOCKS" \
   --kernel-hard-example-power "$KERNEL_HARD_POWER" \
+  --kernel-row-weight "$KERNEL_ROW_WEIGHT" \
+  --kernel-row-batch-size "$KERNEL_ROW_BATCH_SIZE" \
+  --kernel-mining-samples "$KERNEL_MINING_SAMPLES" \
+  --kernel-mining-interval "$KERNEL_MINING_INTERVAL" \
   --kernel-directions "$KERNEL_DIRECTIONS" \
   "${extra_args[@]}" \
   2>&1 | tee -a "$OUTPUT_DIR.log"
