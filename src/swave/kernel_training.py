@@ -19,6 +19,7 @@ and the inversion code.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -77,8 +78,14 @@ class KernelTrainingConfig:
     kernel_train_split: Split = "train"
     require_warm_start: bool = False
     max_initial_score: float = 2.0
+    # <1 trains kernels on a fixed subset of kernel-labelled models (data-scaling
+    # tests); value rows and validation are unchanged.
+    kernel_train_fraction: float = 1.0
 
     def __post_init__(self) -> None:
+        if not (math.isfinite(self.kernel_train_fraction)
+                and 0 < self.kernel_train_fraction <= 1):
+            raise ValueError("kernel_train_fraction must be in (0, 1]")
         if not math.isfinite(self.max_grad_norm) or self.max_grad_norm <= 0:
             raise ValueError("max_grad_norm must be finite and positive")
         if (not math.isfinite(self.max_initial_score)
@@ -272,6 +279,23 @@ def load_kernel_rows(
         rows["kernel_mask"][touched] = finite
     rows["kernel_mask"] &= rows["valid_mask"]
     return rows
+
+
+def select_kernel_fraction(
+    rows: dict[str, NDArray], fraction: float, seed: int
+) -> dict[str, NDArray]:
+    """Keep a seeded fraction of models, chosen by sample ID.
+
+    The choice is a prefix of one permutation of the sorted IDs, so it does not
+    depend on shard read order and smaller fractions are nested in larger ones.
+    """
+    if fraction >= 1:
+        return rows
+    ids = np.asarray(rows["sample_id"])
+    order = np.argsort(ids, kind="stable")
+    keep = order[np.random.default_rng(seed).permutation(len(ids))]
+    keep = np.sort(keep[:max(1, round(fraction * len(ids)))])
+    return {key: value[keep] for key, value in rows.items()}
 
 
 def relative_value_loss(
@@ -523,6 +547,17 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
     kernel_rows = load_kernel_rows(
         config.kernel_dir, config.kernel_train_split, config.corrections
     )
+    if config.kernel_train_fraction < 1:
+        available = len(kernel_rows["sample_id"])
+        kernel_rows = select_kernel_fraction(
+            kernel_rows, config.kernel_train_fraction, config.seed
+        )
+        kept = np.sort(kernel_rows["sample_id"].astype(np.uint64))
+        print(json.dumps({"kernel_train_subset": {
+            "fraction": config.kernel_train_fraction,
+            "models": len(kept), "available_models": available,
+            "sample_id_checksum": hashlib.sha256(kept.tobytes()).hexdigest()[:16],
+        }}), flush=True)
     if config.kernel_row_weight > 0 and not mask_for_split(
         kernel_rows["sample_id"], "train"
     ).all():

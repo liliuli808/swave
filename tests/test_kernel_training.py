@@ -11,6 +11,7 @@ from swave import kernel_training
 from swave.kernel_training import (
     KernelTrainingConfig,
     kernel_checkpoint_key,
+    select_kernel_fraction,
     train_with_kernels,
 )
 from swave.network import FourHeadForwardModel
@@ -284,3 +285,49 @@ def test_row_mining_checks_sample_ids_even_when_the_directory_is_named_train(ker
     with pytest.raises(ValueError, match="non-training sample IDs"):
         train_with_kernels(config)
     assert not config.output_dir.exists()
+
+
+def _subset_rows(count: int) -> dict[str, np.ndarray]:
+    ids = np.arange(100, 100 + count, dtype=np.uint64)[::-1].copy()
+    return {"sample_id": ids, "vs": ids.astype(np.float32)[:, None].repeat(20, 1)}
+
+
+def test_kernel_fraction_is_deterministic_nested_and_keeps_rows_aligned():
+    rows = _subset_rows(40)
+    half = select_kernel_fraction(rows, 0.5, seed=3)
+    quarter = select_kernel_fraction(rows, 0.25, seed=3)
+    assert len(half["sample_id"]) == 20 and len(quarter["sample_id"]) == 10
+    assert set(quarter["sample_id"].tolist()) <= set(half["sample_id"].tolist())
+    np.testing.assert_array_equal(
+        half["sample_id"], select_kernel_fraction(rows, 0.5, seed=3)["sample_id"])
+    # Selection depends on sample IDs, not on the order shards were read in.
+    shuffled = {key: value[::-1].copy() for key, value in rows.items()}
+    assert (set(select_kernel_fraction(shuffled, 0.5, seed=3)["sample_id"].tolist())
+            == set(half["sample_id"].tolist()))
+    np.testing.assert_array_equal(half["vs"][:, 0], half["sample_id"].astype(np.float32))
+    assert len(rows["sample_id"]) == 40
+    assert select_kernel_fraction(rows, 1.0, seed=3) is rows
+
+
+@pytest.mark.parametrize("fraction", [0.0, -0.1, 1.5, float("nan")])
+def test_kernel_fraction_must_be_in_unit_interval(fraction):
+    with pytest.raises(ValueError, match="kernel_train_fraction"):
+        KernelTrainingConfig(
+            base_checkpoint=Path("b"), dataset_dir=Path("d"), kernel_dir=Path("k"),
+            output_dir=Path("o"), cache_dir=Path("c"), kernel_train_fraction=fraction,
+        )
+
+
+def test_training_uses_and_reports_the_kernel_subset(
+    kernel_run, capsys: pytest.CaptureFixture
+):
+    config, _, _ = kernel_run
+    config.kernel_train_fraction = 0.5
+    train_with_kernels(config)
+    output = [json.loads(line) for line in capsys.readouterr().out.splitlines()
+              if line.startswith("{")]
+    subset = next(row["kernel_train_subset"] for row in output
+                  if "kernel_train_subset" in row)
+    assert subset["fraction"] == 0.5
+    assert subset["models"] == 2 and subset["available_models"] == 4
+    assert len(subset["sample_id_checksum"]) == 16

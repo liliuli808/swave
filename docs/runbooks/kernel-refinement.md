@@ -824,6 +824,29 @@ drop from 50% to 100% means more labelled LVL/coupled kernel models are the
 direct route. A flat curve points to regularization (`weight_decay` is 0) or
 input representation of the low-velocity layers instead.
 
+#### Data-fraction test: kw3-fixed recipe on 50% of kernel models
+
+`KERNEL_TRAIN_FRACTION` (default 1) keeps a fixed subset of the kernel-labelled
+training models: a prefix of one seeded permutation of their sorted sample IDs.
+The subset does not depend on shard order, and smaller fractions are contained
+in larger ones. The run prints `kernel_train_subset` with the model count and
+an ID checksum. Value rows, validation and steps per epoch are unchanged, so the
+only difference from kw3-fixed is half as many distinct kernel models, each seen
+twice as often:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 PYTHON=.venv/bin/python \
+OUTPUT_DIR=runs/kernel-wide-kw3-fixed-half RESULTS_DIR=results/forward-kernel-wide-kw3-fixed-half \
+WIDTH=512 BLOCKS=6 EPOCHS=500 LEARNING_RATE=1e-3 WARMUP_STEPS=2000 \
+KERNEL_WEIGHT=3 KERNEL_HARD_POWER=1 KERNEL_TRAIN_FRACTION=0.5 \
+setsid nohup bash scripts/run_kernel_refinement.sh > kernel-wide-kw3-fixed-half.out 2>&1 < /dev/null &
+```
+
+Then run `diag_kernel_failures.py` on both splits as above, and compare the
+LVL/coupled validation rates with kw3-fixed (95.76% / 97.33%). Also compare
+the validation history by epoch: an early lead for the full run that keeps
+widening is the data-limited signature.
+
 ### Earlier tuning knobs (historical; validate corrected gradients first)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.

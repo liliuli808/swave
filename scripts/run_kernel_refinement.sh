@@ -38,6 +38,8 @@ KERNEL_ROW_WEIGHT=${KERNEL_ROW_WEIGHT:-0}
 KERNEL_ROW_BATCH_SIZE=${KERNEL_ROW_BATCH_SIZE:-256}
 KERNEL_MINING_SAMPLES=${KERNEL_MINING_SAMPLES:-8192}
 KERNEL_MINING_INTERVAL=${KERNEL_MINING_INTERVAL:-5}
+# <1 trains kernels on a fixed, seeded subset of kernel-labelled training models.
+KERNEL_TRAIN_FRACTION=${KERNEL_TRAIN_FRACTION:-1}
 # Random Jacobian-vector directions per kernel sample; 0 uses the exact full
 # Jacobian (one JVP per layer, ~10x the kernel cost of the default 2).
 KERNEL_DIRECTIONS=${KERNEL_DIRECTIONS:-2}
@@ -123,6 +125,7 @@ fi
   --kernel-row-batch-size "$KERNEL_ROW_BATCH_SIZE" \
   --kernel-mining-samples "$KERNEL_MINING_SAMPLES" \
   --kernel-mining-interval "$KERNEL_MINING_INTERVAL" \
+  --kernel-train-fraction "$KERNEL_TRAIN_FRACTION" \
   --kernel-directions "$KERNEL_DIRECTIONS" \
   "${extra_args[@]}" \
   2>&1 | tee -a "$OUTPUT_DIR.log"
