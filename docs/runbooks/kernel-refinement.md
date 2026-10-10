@@ -118,6 +118,11 @@ must not fall below the epoch -1 value for long.
 
 ## 6. Tuning if acceptance is NOT YET
 
+**Current recommendation (2026-10-10):** use the corrected-gradient warm-start
+experiment below. The earlier capacity and estimator-noise explanations were
+working hypotheses; the mixed-derivative defect found on 2026-10-10 invalidates
+using those runs alone to diagnose a capacity limit.
+
 ### Result of the first GPU run (2026-10-07, 50-epoch fine-tune, defaults)
 
 | model | curves ≤ 1 % | points ≤ 1 % | max rel | kernel rows ≤ 5 % | kernel median |
@@ -265,7 +270,129 @@ Compare validation `kernel_rows_within_5pct` against the 512×6 run's history
 at the same epoch. If it is not clearly ahead by epoch ~30, the estimator noise
 was not the bottleneck: stop the run and return to the per-kind options above.
 
-### Further knobs (one change at a time, fresh `OUTPUT_DIR` each run)
+### 2026-10-10: fix mixed derivatives before another architecture experiment
+
+The latest completed run is `kernel-wide-exact` (2026-10-09 22:19). Comparing
+the saved test summaries gives:
+
+| Run | Models with every valid value within 1 % | Kernel rows within 5 % | Median kernel error |
+| --- | --- | --- | --- |
+| wide, 512×6 | 99.608 % | 97.505 % | 0.263 % |
+| kw3, 512×6 | 99.584 % | 97.562 % | 0.232 % |
+| wide, 768×8 | 99.562 % | 97.583 % | 0.176 % |
+| profile features | 96.344 % | 95.271 % | 0.933 % |
+| exact Jacobian | 97.894 % | 96.458 % | 0.736 % |
+
+Both acceptance rates must remain at least 99 %. A small median does not
+remove the failing tail. In the kw3 test result, M0/M1/M2/M3 kernel pass rates
+are 99.446/98.489/97.165/95.125 %, respectively.
+
+The exact run did **not** converge to its reported summary: `best.pt` came
+from epoch 252 (zero-based). At epoch 499 its validation curve pass rate was
+0 % and kernel pass rate 11.152 %. Several intervening epochs had loss spikes;
+at epoch 341 the training kernel loss reached 8.54 million. The profile-feature
+run also selected an earlier checkpoint, epoch 223. These histories indicate
+optimization instability, not just a persistent small tail.
+
+#### Reproduced implementation defect
+
+On local CPU PyTorch `2.14.1+cu130`, native `nn.LayerNorm` inside
+`torch.func.jvp` produced the correct Jacobian loss **value**, but backpropagating
+that loss gave incorrect gradients for parameters before the normalization.
+A float64 16-wide, one-block reproduction showed 33–46 % relative gradient
+errors in affected parameter groups. For one input weight:
+
+| Gradient computation | Derivative of the same scalar kernel loss |
+| --- | --- |
+| Native LayerNorm, JVP then backward | −115.693467 |
+| Reverse-mode Jacobian then backward | −209.348536 |
+| Central finite difference in that weight | −209.348536 |
+
+Writing LayerNorm as centered values, mean squared deviation, and reciprocal
+square root reduced the maximum parameter-gradient discrepancy in that
+reproduction from 93.66 to about `8.5e-14`. This uses the same normalization
+formula, epsilon, and biased variance as [PyTorch LayerNorm](https://docs.pytorch.org/docs/stable/generated/torch.nn.LayerNorm.html).
+`HigherOrderLayerNorm` implements this change and retains the existing
+weight/bias keys, so old checkpoints still load. It fixes both random-direction
+and exact-Jacobian loss backpropagation. The old tests checked loss values and
+physical kernels, but did not check these mixed parameter/input derivatives.
+
+`tests/test_kernels.py` now compares the parameter gradients against a
+reverse-mode Jacobian and a scalar finite difference, for both loss modes and
+CPU/CUDA where available. The pipeline runs these tests before training. The
+GPU run's PyTorch version was not recorded, and CUDA is unavailable locally;
+the defect is reproduced locally, while its contribution to the production
+training failures must be verified by the corrected GPU experiment. Startup
+logs and checkpoints now record the PyTorch version.
+
+Two additional training defects are fixed:
+
+* `BASE_CHECKPOINT` now loads weights whenever its architecture matches the
+  requested one, including wide networks. Previously only 256×4 loaded weights;
+  pointing at a wide checkpoint still initialized a random model.
+* Epoch −1 is saved as `best.pt`, so a fine-tune that never improves cannot
+  silently return its worse final model. Resuming also retains every completed
+  history epoch instead of dropping one due to the epoch −1 record.
+
+Training now rejects nonfinite losses/gradient norms before an optimizer update
+and logs the mean/max gradient norm before clipping and clipping fraction.
+These guards do not detect every finite-valued loss spike; inspect validation
+and stop a deteriorating experiment rather than allowing another 500 epochs.
+
+#### Other evidence and limits
+
+An additional local check used 300 validation models, 75 per kind, sampled
+from the first ten kernel shards with seed 20261010 (143,631 valid kernel
+rows). Recomputing with steps `1e-6` versus `1e-5` gave p99 row disagreement
+0.0323 %, with no rows above 5 %. Float16 storage versus the recomputed
+`1e-5` labels gave p99 error 0.0469 %. A larger `1e-4` step gave p99 drift
+3.286 % and 0.515 % of rows above 5 %. This sample does not support label
+roundoff as the dominant explanation; it does not certify all training labels
+or rule out root/branch defects in rare cases.
+
+Keep `PROFILE_FEATURES=0` for the next experiment. That branch currently
+computes anomaly features on layer-wise standardized inputs, not physical Vs.
+All 75 monotone normal profiles in the above sample acquired nonzero anomaly
+features after normalization, while none did in physical units. Its `argmax`
+depth features also jump at ties and have zero derivative away from switches.
+A future feature experiment should use physical Vs and smooth depth features,
+with explicit checkpoint versioning; this change does not reinterpret existing
+profile-feature checkpoints.
+
+#### Next GPU experiment: short warm-start with corrected gradients
+
+Use the kw3 checkpoint because its saved validation score (about 0.03026) is
+better than the 768 checkpoint's (about 0.03093); it is also smaller. Keep the
+test split for the final acceptance check. Use a **new** output directory and
+a fresh optimizer, not the diverged exact run's `last.pt` or its optimizer.
+
+```bash
+BASE_CHECKPOINT=runs/kernel-wide-kw3/best.pt \
+OUTPUT_DIR=runs/kernel-corrected-grad RESULTS_DIR=results/forward-kernel-corrected-grad \
+WIDTH=512 BLOCKS=6 PROFILE_FEATURES=0 \
+EPOCHS=50 LEARNING_RATE=2e-5 WARMUP_STEPS=300 MAX_GRAD_NORM=1 \
+KERNEL_WEIGHT=1 KERNEL_DIRECTIONS=2 KERNEL_BATCH_SIZE=2048 \
+HARD_EXAMPLE_POWER=0 KERNEL_HARD_POWER=0 \
+nohup bash scripts/run_kernel_refinement.sh > kernel-corrected-grad.out 2>&1 &
+```
+
+Set `PYTHON=python3` if that is the interpreter for the installed project.
+Startup must report `"initialization": "base_checkpoint"`; epoch −1 should
+approximately reproduce the kw3 validation rates (99.51 % curves, 97.464 %
+kernel rows), allowing floating-point differences from LayerNorm. A score near
+2 instead indicates incorrect initialization or incompatible data/settings.
+
+These are conservative starting settings, not a guarantee of meeting 99 %.
+The first 10–20 epochs should retain the curve pass rate and improve kernel
+validation agreement without loss spikes. Finish the 50-epoch run only if it
+remains stable. If stable but flat, compare `KERNEL_WEIGHT=3` in a separate
+short run, then test more random directions at the same kernel batch size.
+The old exact experiment changed both directions and batch size (2048→512),
+so it was not an isolated test of estimator noise. Defer architecture changes,
+feature conditioning, and row-targeted hard mining until the corrected baseline
+is measured. Do not relax acceptance masks to hide failing rows.
+
+### Earlier tuning knobs (historical; validate corrected gradients first)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.
 2. Values regress during training: `LEARNING_RATE` halved or `KERNEL_WEIGHT=0.3`.

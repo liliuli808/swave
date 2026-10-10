@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import pytest
 import torch
 from scipy.optimize import brentq
 
@@ -129,3 +130,73 @@ def test_kernel_loss_exact_mode_uses_the_full_jacobian() -> None:
     torch.testing.assert_close(prediction, forward(vs))
     # Mode 3 holds one bad row out of 15 cells; the other modes are exact.
     assert math.isclose(float(loss), expected**2 / 15 / 4, rel_tol=1e-5)
+
+
+@pytest.mark.parametrize("directions", [0, 2])
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="CUDA is unavailable"
+    ))],
+)
+def test_kernel_loss_parameter_gradients_match_reverse_ad_and_finite_difference(
+    directions: int, device: str
+) -> None:
+    """Correct JVP values alone do not guarantee correct Sobolev updates."""
+    from swave.kernel_training import KERNEL_FLOOR, KERNEL_SCALE, kernel_loss
+
+    torch.manual_seed(12)
+    model = FourHeadForwardModel(
+        input_size=3, width=8, blocks=1, frequencies=2
+    ).to(device=device, dtype=torch.float64)
+    vs = torch.randn(2, 3, dtype=torch.float64, device=device)
+    kernel = torch.randn(2, 4, 2, 3, dtype=torch.float64, device=device)
+    mask = torch.ones(2, 4, 2, dtype=torch.bool, device=device)
+
+    def loss() -> torch.Tensor:
+        return kernel_loss(
+            model, vs, kernel, mask, directions,
+            generator=torch.Generator().manual_seed(17),
+        )[1]
+
+    actual = loss()
+    parameters = tuple(model.parameters())
+    gradients = torch.autograd.grad(actual, parameters, allow_unused=True)
+    jacobian = torch.vmap(torch.func.jacrev(lambda x: model(x[None])[0]))(vs)
+    delta = jacobian - kernel
+    if directions:
+        tangent = torch.randn(
+            directions, *vs.shape, dtype=vs.dtype,
+            generator=torch.Generator().manual_seed(17),
+        ).to(device)
+        squared = torch.einsum("bmfl,dbl->dbmf", delta, tangent).square().mean(0)
+    else:
+        squared = delta.square().sum(-1)
+    reference = (
+        squared / (kernel.square().sum(-1) + KERNEL_FLOOR**2) / KERNEL_SCALE**2
+    ).mean()
+    expected = torch.autograd.grad(reference, parameters, allow_unused=True)
+    torch.testing.assert_close(actual, reference, rtol=1e-10, atol=1e-10)
+    for gradient, target in zip(gradients, expected, strict=True):
+        if target is None:
+            assert gradient is None or torch.count_nonzero(gradient) == 0
+        else:
+            torch.testing.assert_close(gradient, target, rtol=1e-8, atol=1e-8)
+
+    # Check a parameter before LayerNorm against the scalar loss itself.
+    parameter = model.input[0].weight
+    original = parameter[0, 0].item()
+    step = 1e-5
+    try:
+        with torch.no_grad():
+            parameter[0, 0] = original + step
+        upper = loss().item()
+        with torch.no_grad():
+            parameter[0, 0] = original - step
+        lower = loss().item()
+    finally:
+        with torch.no_grad():
+            parameter[0, 0] = original
+    assert gradients[0][0, 0].item() == pytest.approx(
+        (upper - lower) / (2 * step), rel=1e-6, abs=1e-5
+    )

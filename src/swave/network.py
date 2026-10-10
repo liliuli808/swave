@@ -65,6 +65,27 @@ def profile_feature_expansion(vs: Tensor) -> Tensor:
     )
 
 
+class HigherOrderLayerNorm(nn.LayerNorm):
+    """LayerNorm with an autograd graph for its mean and variance.
+
+    The native LayerNorm JVP can have correct values but incorrect parameter
+    gradients when backpropagating a derivative loss. Expressing the same
+    normalization with elementary operations keeps the mixed derivatives
+    intact. Inheriting LayerNorm preserves legacy weight/bias state dict keys.
+    """
+
+    def forward(self, value: Tensor) -> Tensor:
+        dimensions = tuple(range(-len(self.normalized_shape), 0))
+        centered = value - value.mean(dim=dimensions, keepdim=True)
+        variance = centered.square().mean(dim=dimensions, keepdim=True)
+        output = centered * torch.rsqrt(variance + self.eps)
+        if self.weight is not None:
+            output = output * self.weight
+        if self.bias is not None:
+            output = output + self.bias
+        return output
+
+
 class ResidualBlock(nn.Module):
     """A normalized residual multilayer-perceptron block."""
 
@@ -75,7 +96,7 @@ class ResidualBlock(nn.Module):
             nn.GELU(),
             nn.Linear(width * 2, width),
         )
-        self.norm = nn.LayerNorm(width)
+        self.norm = HigherOrderLayerNorm(width)
 
     def forward(self, value: Tensor) -> Tensor:
         return self.norm(value + self.layers(value))

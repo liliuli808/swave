@@ -22,6 +22,8 @@ KERNEL_BATCH_SIZE=${KERNEL_BATCH_SIZE:-2048}
 LEARNING_RATE=${LEARNING_RATE:-2e-4}
 WARMUP_STEPS=${WARMUP_STEPS:-300}
 KERNEL_WEIGHT=${KERNEL_WEIGHT:-1.0}
+MAX_GRAD_NORM=${MAX_GRAD_NORM:-10.0}
+HARD_EXAMPLE_POWER=${HARD_EXAMPLE_POWER:-1.0}
 # >0 resamples kernel-labelled models in proportion to their worst kernel row.
 KERNEL_HARD_POWER=${KERNEL_HARD_POWER:-0}
 # Random Jacobian-vector directions per kernel sample; 0 uses the exact full
@@ -30,7 +32,7 @@ KERNEL_DIRECTIONS=${KERNEL_DIRECTIONS:-2}
 # 1 derives anomaly-localizing profile features inside the network (fresh
 # training; cannot fine-tune the 256x4 base checkpoint with this on).
 PROFILE_FEATURES=${PROFILE_FEATURES:-0}
-# 256/4 fine-tunes the base checkpoint; any other size trains from scratch.
+# Matching architectures fine-tune BASE_CHECKPOINT; other sizes start randomly.
 WIDTH=${WIDTH:-256}
 BLOCKS=${BLOCKS:-4}
 THREADS=${THREADS:-$(nproc)}
@@ -51,7 +53,7 @@ if [ "$DEVICE" = cuda ]; then
   "$PYTHON" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" \
     || fail "DEVICE=cuda but torch.cuda.is_available() is False (set DEVICE=cpu to run on CPU)"
 fi
-"$PYTHON" -m pytest -q tests/test_kernels.py tests/test_solver.py \
+"$PYTHON" -m pytest -q tests/test_kernels.py tests/test_kernel_training.py tests/test_solver.py \
   || fail "kernel/solver tests failed"
 
 log "stage 1: physical sensitivity-kernel labels -> $KERNEL_DIR"
@@ -77,6 +79,7 @@ fi
   --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" \
   --kernel-batch-size "$KERNEL_BATCH_SIZE" --learning-rate "$LEARNING_RATE" \
   --warmup-steps "$WARMUP_STEPS" --kernel-weight "$KERNEL_WEIGHT" \
+  --max-grad-norm "$MAX_GRAD_NORM" --hard-example-power "$HARD_EXAMPLE_POWER" \
   --width "$WIDTH" --blocks "$BLOCKS" \
   --kernel-hard-example-power "$KERNEL_HARD_POWER" \
   --kernel-directions "$KERNEL_DIRECTIONS" \

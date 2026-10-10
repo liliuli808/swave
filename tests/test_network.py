@@ -93,3 +93,18 @@ def test_model_from_checkpoint_profile_features_roundtrip() -> None:
         {"architecture": {"width": 32, "blocks": 1}, "model": plain.state_dict()}
     )
     assert not legacy.profile_features
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_layer_norm_preserves_native_outputs_and_input_jacobians(dtype) -> None:
+    from swave.network import HigherOrderLayerNorm
+
+    torch.manual_seed(8)
+    native = torch.nn.LayerNorm(16).to(dtype=dtype)
+    replacement = HigherOrderLayerNorm(16).to(dtype=dtype)
+    replacement.load_state_dict(native.state_dict(), strict=True)
+    values = torch.randn(3, 16, dtype=dtype)
+    tangent = torch.randn_like(values)
+    expected = torch.func.jvp(native, (values,), (tangent,))
+    actual = torch.func.jvp(replacement, (values,), (tangent,))
+    torch.testing.assert_close(actual, expected)

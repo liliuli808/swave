@@ -58,6 +58,7 @@ class KernelTrainingConfig:
     warmup_steps: int = 500
     final_learning_rate: float = 1e-6
     weight_decay: float = 0.0
+    max_grad_norm: float = 10.0
     hard_example_power: float = 1.0
     kernel_hard_example_power: float = 0.0
     threads: int = 6
@@ -69,6 +70,10 @@ class KernelTrainingConfig:
     steps_per_epoch: int | None = None
     corrections: Path | None = None
     kernel_train_split: Split = "train"
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.max_grad_norm) or self.max_grad_norm <= 0:
+            raise ValueError("max_grad_norm must be finite and positive")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -414,8 +419,26 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
         blocks=config.blocks,
         profile_features=config.profile_features,
     )
-    if (config.width, config.blocks) == (256, 4) and not config.profile_features:
+    architecture = {
+        "width": config.width,
+        "blocks": config.blocks,
+        "profile_features": config.profile_features,
+    }
+    base_architecture = {
+        "width": 256, "blocks": 4, "profile_features": False,
+        **(base.get("architecture") or {}),
+    }
+    warm_start = all(
+        base_architecture[key] == value for key, value in architecture.items()
+    )
+    if warm_start:
         model.load_state_dict(base["model"])
+    print(json.dumps({
+        "initialization": "base_checkpoint" if warm_start else "random",
+        "base_checkpoint": str(config.base_checkpoint),
+        "architecture": architecture,
+        "torch_version": str(torch.__version__),
+    }), flush=True)
     model.to(device)
     forward = normalizer.physical(model)
 
@@ -486,6 +509,26 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
     history: list[dict[str, object]] = []
     start_epoch = 0
     best_score = float("inf")
+
+    def checkpoint(epoch: int, score: float) -> dict[str, object]:
+        return {
+            **{key: value for key, value in base.items()
+               if key not in {"model", "optimizer", "scheduler"}},
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "epoch": epoch,
+            "best_score": score,
+            "architecture": architecture,
+            "kernel_training_config": config.to_dict(),
+            "base_checkpoint": str(config.base_checkpoint),
+            "kernel_training_runtime": {
+                "torch_version": str(torch.__version__),
+                "device": str(device),
+                "layer_norm": "elementary_ops_v1",
+            },
+        }
+
     if last_path.exists():
         payload = torch.load(last_path, map_location="cpu", weights_only=False)
         model.load_state_dict(payload["model"])
@@ -495,12 +538,18 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
         best_score = float(payload["best_score"])
         rng = np.random.default_rng(config.seed + start_epoch)
         if history_path.exists():
-            history = json.loads(history_path.read_text())["epochs"][:start_epoch]
+            history = [
+                record for record in json.loads(history_path.read_text())["epochs"]
+                if record["epoch"] < start_epoch
+            ]
     else:
         model.eval()
         initial = evaluate_rows(forward, validation_rows)
-        history.append({"epoch": -1, "validation": initial})
         best_score = _selection_score(initial)
+        history.append({"epoch": -1, "score": best_score, "validation": initial})
+        # A fine-tune can regress for every epoch. Keep the actual initial best,
+        # rather than falling back to a worse last.pt if no update beats it.
+        _save(best_path, checkpoint(-1, best_score))
         print(json.dumps({"epoch": -1, "score": best_score}), flush=True)
 
     # Per-sample hard-example weights from the latest relative error.
@@ -515,6 +564,9 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
             order = torch.multinomial(probability, len(train_vs), replacement=True)
         value_total = 0.0
         kernel_total = 0.0
+        grad_norm_total = 0.0
+        grad_norm_max = 0.0
+        clipped_steps = 0
         for step in range(steps_per_epoch):
             index = order[step * config.batch_size : (step + 1) * config.batch_size]
             if config.kernel_hard_example_power > 0:
@@ -543,9 +595,18 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
                 kernel_value_mask[kernel_index],
             )
             loss = value + config.kernel_weight * derivative
+            if not torch.isfinite(loss).item():
+                raise FloatingPointError(
+                    f"non-finite training loss at epoch {epoch}, step {step}"
+                )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+            grad_norm = float(torch.nn.utils.clip_grad_norm_(
+                model.parameters(), config.max_grad_norm, error_if_nonfinite=True
+            ))
+            grad_norm_total += grad_norm
+            grad_norm_max = max(grad_norm_max, grad_norm)
+            clipped_steps += grad_norm > config.max_grad_norm
             optimizer.step()
             scheduler.step()
             value_total += float(value.detach())
@@ -575,26 +636,15 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
             "value_loss": value_total / steps_per_epoch,
             "kernel_loss": kernel_total / steps_per_epoch,
             "learning_rate": float(optimizer.param_groups[0]["lr"]),
+            "grad_norm_mean": grad_norm_total / steps_per_epoch,
+            "grad_norm_max": grad_norm_max,
+            "grad_clip_fraction": clipped_steps / steps_per_epoch,
             "seconds": time.time() - started,
             "score": score,
             "validation": metrics,
         }
         history.append(record)
-        payload = {
-            **{key: base[key] for key in base if key not in {"model", "optimizer", "scheduler"}},
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "epoch": epoch,
-            "best_score": min(best_score, score),
-            "architecture": {
-                "width": config.width,
-                "blocks": config.blocks,
-                "profile_features": config.profile_features,
-            },
-            "kernel_training_config": config.to_dict(),
-            "base_checkpoint": str(config.base_checkpoint),
-        }
+        payload = checkpoint(epoch, min(best_score, score))
         _save(last_path, payload)
         if score < best_score:
             best_score = score
@@ -604,7 +654,11 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
             json.dumps(
                 {
                     key: record[key]
-                    for key in ("epoch", "value_loss", "kernel_loss", "seconds", "score")
+                    for key in (
+                        "epoch", "value_loss", "kernel_loss", "learning_rate",
+                        "grad_norm_mean", "grad_norm_max", "grad_clip_fraction",
+                        "seconds", "score",
+                    )
                 }
                 | {
                     "samples_all_within_1pct": metrics["value"]["samples_all_within_1pct"],
