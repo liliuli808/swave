@@ -101,3 +101,66 @@ def test_nonfinite_loss_stops_before_writing_a_bad_checkpoint(
         train_with_kernels(config)
     assert (config.output_dir / "best.pt").exists()
     assert not (config.output_dir / "last.pt").exists()
+
+
+def test_required_warm_start_rejects_architecture_mismatch_before_loading_data(
+    kernel_run, monkeypatch: pytest.MonkeyPatch
+):
+    config, _, evaluations = kernel_run
+    config.require_warm_start = True
+    config.width = 16
+
+    def unexpected_load(*args):
+        pytest.fail("architecture mismatch must fail before loading the dataset")
+
+    monkeypatch.setattr(kernel_training, "load_split_rows", unexpected_load)
+    with pytest.raises(ValueError, match="checkpoint architecture does not match"):
+        train_with_kernels(config)
+    assert not evaluations
+    assert not config.output_dir.exists()
+
+
+def test_required_warm_start_refuses_to_resume_an_existing_run(kernel_run):
+    config, _, _ = kernel_run
+    train_with_kernels(config)
+    config.require_warm_start = True
+    config.epochs = 2
+    with pytest.raises(ValueError, match="refuses automatic resume"):
+        train_with_kernels(config)
+    saved = torch.load(config.output_dir / "last.pt", weights_only=False)
+    assert saved["epoch"] == 0
+
+
+@pytest.mark.parametrize("rate", [0.0, float("nan")])
+def test_initial_score_guard_rejects_bad_start_before_any_training(
+    kernel_run, monkeypatch: pytest.MonkeyPatch, rate: float
+):
+    config, _, _ = kernel_run
+    config.require_warm_start = True
+    config.max_initial_score = 0.05
+    monkeypatch.setattr(kernel_training, "evaluate_rows", lambda *args: {
+        "value": {"samples_all_within_1pct": rate},
+        "kernel": {"rows_within_5pct": rate, "median_relative_l2": 1 - rate},
+    })
+    with pytest.raises(ValueError, match="initial validation score"):
+        train_with_kernels(config)
+    assert not (config.output_dir / "best.pt").exists()
+    assert not (config.output_dir / "last.pt").exists()
+
+
+def test_required_warm_start_accepts_good_checkpoint_and_reports_source(
+    kernel_run, capsys: pytest.CaptureFixture
+):
+    config, _, _ = kernel_run
+    config.require_warm_start = True
+    config.max_initial_score = 0.05
+    train_with_kernels(config)
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert records[0]["initialization"] == "base_checkpoint"
+    assert records[0]["resume_checkpoint"] is None
+    assert records[0]["kernel_training_source"] == str(
+        Path(kernel_training.__file__).resolve()
+    )
+    assert records[1]["epoch"] == -1
+    assert records[1]["samples_all_within_1pct"] == 1.0
+    assert records[1]["kernel_rows_within_5pct"] == 1.0

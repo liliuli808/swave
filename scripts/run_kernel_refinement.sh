@@ -7,6 +7,10 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# Every pipeline stage must use this checkout, even if another swave version
+# was previously installed into the selected Python environment.
+SWAVE_REPO_ROOT=$(pwd -P)
+export PYTHONPATH="$SWAVE_REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 DATASET_DIR=${DATASET_DIR:-data/production}
 BASE_CHECKPOINT=${BASE_CHECKPOINT:-runs/production-48g/best.pt}
@@ -24,6 +28,9 @@ WARMUP_STEPS=${WARMUP_STEPS:-300}
 KERNEL_WEIGHT=${KERNEL_WEIGHT:-1.0}
 MAX_GRAD_NORM=${MAX_GRAD_NORM:-10.0}
 HARD_EXAMPLE_POWER=${HARD_EXAMPLE_POWER:-1.0}
+# Set to 1 for a fresh fine-tune: reject mismatched architecture and last.pt.
+REQUIRE_WARM_START=${REQUIRE_WARM_START:-0}
+MAX_INITIAL_SCORE=${MAX_INITIAL_SCORE:-2.0}
 # >0 resamples kernel-labelled models in proportion to their worst kernel row.
 KERNEL_HARD_POWER=${KERNEL_HARD_POWER:-0}
 # Random Jacobian-vector directions per kernel sample; 0 uses the exact full
@@ -48,7 +55,27 @@ shards=$(find "$DATASET_DIR" -maxdepth 1 -name 'shard-*.h5' | wc -l)
 [ "$shards" -eq 100 ] || fail "expected 100 shards in $DATASET_DIR, found $shards"
 [ -f "$BASE_CHECKPOINT" ] || fail "base checkpoint $BASE_CHECKPOINT not found"
 [ -f "$CORRECTIONS" ] || fail "corrections file $CORRECTIONS not found"
-"$PYTHON" -c "import swave" 2>/dev/null || fail "swave is not installed: run python -m pip install -e '.[dev]'"
+if [ "$REQUIRE_WARM_START" = "1" ] && [ -f "$OUTPUT_DIR/last.pt" ]; then
+  fail "REQUIRE_WARM_START=1 refuses $OUTPUT_DIR/last.pt; use a new OUTPUT_DIR"
+fi
+"$PYTHON" - <<'PY'
+import json
+import sys
+from pathlib import Path
+import swave.kernel_training as training
+from swave.network import HigherOrderLayerNorm, ResidualBlock
+
+source = Path(training.__file__).resolve()
+expected = Path("src/swave/kernel_training.py").resolve()
+if source != expected:
+    raise RuntimeError(f"loaded {source}, expected checkout source {expected}")
+norm = ResidualBlock(8).norm
+if not isinstance(norm, HigherOrderLayerNorm):
+    raise RuntimeError("kernel training requires HigherOrderLayerNorm")
+print(json.dumps({"python_executable": sys.executable,
+                  "kernel_training_source": str(source),
+                  "layer_norm": type(norm).__name__}), flush=True)
+PY
 if [ "$DEVICE" = cuda ]; then
   "$PYTHON" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" \
     || fail "DEVICE=cuda but torch.cuda.is_available() is False (set DEVICE=cpu to run on CPU)"
@@ -71,6 +98,9 @@ extra_args=()
 if [ "${PROFILE_FEATURES:-0}" = "1" ]; then
   extra_args+=(--profile-features)
 fi
+if [ "$REQUIRE_WARM_START" = "1" ]; then
+  extra_args+=(--require-warm-start)
+fi
 "$PYTHON" scripts/finetune_forward_kernels.py \
   --base-checkpoint "$BASE_CHECKPOINT" \
   --dataset-dir "$DATASET_DIR" --kernel-dir "$KERNEL_DIR" \
@@ -80,6 +110,7 @@ fi
   --kernel-batch-size "$KERNEL_BATCH_SIZE" --learning-rate "$LEARNING_RATE" \
   --warmup-steps "$WARMUP_STEPS" --kernel-weight "$KERNEL_WEIGHT" \
   --max-grad-norm "$MAX_GRAD_NORM" --hard-example-power "$HARD_EXAMPLE_POWER" \
+  --max-initial-score "$MAX_INITIAL_SCORE" \
   --width "$WIDTH" --blocks "$BLOCKS" \
   --kernel-hard-example-power "$KERNEL_HARD_POWER" \
   --kernel-directions "$KERNEL_DIRECTIONS" \

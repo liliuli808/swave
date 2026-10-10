@@ -70,10 +70,15 @@ class KernelTrainingConfig:
     steps_per_epoch: int | None = None
     corrections: Path | None = None
     kernel_train_split: Split = "train"
+    require_warm_start: bool = False
+    max_initial_score: float = 2.0
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.max_grad_norm) or self.max_grad_norm <= 0:
             raise ValueError("max_grad_norm must be finite and positive")
+        if (not math.isfinite(self.max_initial_score)
+                or not 0 <= self.max_initial_score <= 2):
+            raise ValueError("max_initial_score must be finite and between 0 and 2")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -431,13 +436,30 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
     warm_start = all(
         base_architecture[key] == value for key, value in architecture.items()
     )
+    last_path = config.output_dir / "last.pt"
+    if config.require_warm_start:
+        if last_path.exists():
+            raise ValueError(
+                f"require_warm_start refuses automatic resume from {last_path}; "
+                "use a new output_dir for fresh fine-tuning"
+            )
+        if not warm_start:
+            raise ValueError(
+                "require_warm_start: checkpoint architecture does not match the "
+                f"requested architecture: base={base_architecture}, "
+                f"requested={architecture}"
+            )
     if warm_start:
         model.load_state_dict(base["model"])
     print(json.dumps({
-        "initialization": "base_checkpoint" if warm_start else "random",
+        "initialization": ("resume" if last_path.exists() else
+                           "base_checkpoint" if warm_start else "random"),
         "base_checkpoint": str(config.base_checkpoint),
+        "resume_checkpoint": str(last_path) if last_path.exists() else None,
         "architecture": architecture,
         "torch_version": str(torch.__version__),
+        "kernel_training_source": str(Path(__file__).resolve()),
+        "configuration": config.to_dict(),
     }), flush=True)
     model.to(device)
     forward = normalizer.physical(model)
@@ -503,7 +525,6 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    last_path = config.output_dir / "last.pt"
     best_path = config.output_dir / "best.pt"
     history_path = config.output_dir / "history.json"
     history: list[dict[str, object]] = []
@@ -546,11 +567,24 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
         model.eval()
         initial = evaluate_rows(forward, validation_rows)
         best_score = _selection_score(initial)
+        print(json.dumps({
+            "epoch": -1,
+            "score": best_score,
+            "samples_all_within_1pct": initial["value"]["samples_all_within_1pct"],
+            "kernel_rows_within_5pct": initial["kernel"]["rows_within_5pct"],
+            "kernel_median": initial["kernel"]["median_relative_l2"],
+        }), flush=True)
+        if not math.isfinite(best_score) or best_score > config.max_initial_score:
+            raise ValueError(
+                f"initial validation score {best_score} is non-finite or exceeds "
+                "max_initial_score="
+                f"{config.max_initial_score}; check the checkpoint, loaded code "
+                "and data before training"
+            )
         history.append({"epoch": -1, "score": best_score, "validation": initial})
         # A fine-tune can regress for every epoch. Keep the actual initial best,
         # rather than falling back to a worse last.pt if no update beats it.
         _save(best_path, checkpoint(-1, best_score))
-        print(json.dumps({"epoch": -1, "score": best_score}), flush=True)
 
     # Per-sample hard-example weights from the latest relative error.
     sample_weight = torch.ones(len(train_vs), device=device)

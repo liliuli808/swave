@@ -368,12 +368,13 @@ a fresh optimizer, not the diverged exact run's `last.pt` or its optimizer.
 
 ```bash
 BASE_CHECKPOINT=runs/kernel-wide-kw3/best.pt \
-OUTPUT_DIR=runs/kernel-corrected-grad RESULTS_DIR=results/forward-kernel-corrected-grad \
+OUTPUT_DIR=runs/kernel-corrected-grad-v2 RESULTS_DIR=results/forward-kernel-corrected-grad-v2 \
 WIDTH=512 BLOCKS=6 PROFILE_FEATURES=0 \
+REQUIRE_WARM_START=1 MAX_INITIAL_SCORE=0.05 \
 EPOCHS=50 LEARNING_RATE=2e-5 WARMUP_STEPS=300 MAX_GRAD_NORM=1 \
 KERNEL_WEIGHT=1 KERNEL_DIRECTIONS=2 KERNEL_BATCH_SIZE=2048 \
 HARD_EXAMPLE_POWER=0 KERNEL_HARD_POWER=0 \
-nohup bash scripts/run_kernel_refinement.sh > kernel-corrected-grad.out 2>&1 &
+nohup bash scripts/run_kernel_refinement.sh > kernel-corrected-grad-v2.out 2>&1 &
 ```
 
 Set `PYTHON=python3` if that is the interpreter for the installed project.
@@ -381,6 +382,16 @@ Startup must report `"initialization": "base_checkpoint"`; epoch −1 should
 approximately reproduce the kw3 validation rates (99.51 % curves, 97.464 %
 kernel rows), allowing floating-point differences from LayerNorm. A score near
 2 instead indicates incorrect initialization or incompatible data/settings.
+
+The pipeline prepends this checkout's `src` to `PYTHONPATH`, verifies the loaded
+module path and `HigherOrderLayerNorm`, and logs the Python executable. This
+prevents an older installed `swave` from silently taking precedence.
+`REQUIRE_WARM_START=1` requires matching base weights and rejects an existing
+`OUTPUT_DIR/last.pt`; `MAX_INITIAL_SCORE=0.05` stops a bad initial evaluation
+before any training update. These opt-in guards preserve deliberate scratch
+training and resume behavior for the historical commands. To intentionally
+resume a verified corrected run, unset `REQUIRE_WARM_START`; the initial-score
+guard applies to fresh runs only.
 
 These are conservative starting settings, not a guarantee of meeting 99 %.
 The first 10–20 epochs should retain the curve pass rate and improve kernel
@@ -391,6 +402,29 @@ The old exact experiment changed both directions and batch size (2048→512),
 so it was not an isolated test of estimator noise. Defer architecture changes,
 feature conditioning, and row-targeted hard mining until the corrected baseline
 is measured. Do not relax acceptance masks to hide failing rows.
+
+#### Diagnosing the reported failed launch
+
+The command reported on 2026-10-10 used the intended kw3 checkpoint and
+`LEARNING_RATE=2e-5`, but its log started with epoch −1 score 2.0, followed by
+epoch 0 curve/kernel pass rates both 0 %. Epochs 34–38 then slowly improved
+from 11.82 to 13.91 % curves and 76.55 to 77.23 % kernel rows. This is a bad
+starting state, not a collapse from the expected kw3 validation performance.
+
+The pasted raw epoch lines also lack the learning-rate and gradient fields
+always emitted by commit `cd8db0e`; no initialization record appears between
+stage 2 and epoch −1. This strongly indicates an older training implementation
+was executed (old checkout, installed package, process, or log). In the old
+implementation width 512 ignored the base checkpoint weights and initialized
+randomly, which is consistent with these observations. The remote source path
+was not available, so the specific installation/process cause is not yet proven.
+
+Stop that specific failed training process before relaunching. Update the GPU
+checkout with `git pull --ff-only`; pulling does not update an already running
+Python process. Run the guarded command above in a new output directory so the
+failed run's `last.pt` and optimizer are not restored. Preserve the failed
+directory for diagnosis; do not delete it or overwrite the kw3 checkpoint.
+The expected initial score is about 0.03026. A score of 2 now stops immediately.
 
 ### Earlier tuning knobs (historical; validate corrected gradients first)
 

@@ -21,6 +21,12 @@ def main() -> int:
         name = "--" + item.name.replace("_", "-")
         if item.type in {"Path", Path}:
             parser.add_argument(name, type=Path, required=True)
+        elif item.name == "require_warm_start":
+            parser.add_argument(
+                name, action="store_true",
+                help="Require a fresh fine-tune from matching base weights; "
+                     "reject random initialization and automatic resume.",
+            )
         elif item.type in {bool, "bool"}:
             parser.add_argument(name, action="store_true")
         elif item.name == "corrections":
