@@ -193,9 +193,8 @@ python3 scripts/diag_kernel_failures.py \
 ```
 
 It reports the failing rows by mode, frequency, model kind, and physical-kernel
-norm (a near-zero denominator near mode-kissing frequencies inflates the
-relative error). Decide based on its output: fix labels/augment data for the
-affected kinds, or exempt small-norm rows from the 5 % relative threshold.
+norm. Use those groups to investigate labels or data coverage. Keep the
+acceptance masks and 5% relative threshold fixed; do not exempt failing rows.
 
 ### Diagnosis of the 768 run's failing rows (2026-10-08)
 
@@ -210,16 +209,17 @@ norms) and not frequency-localized; they track the model kind:
 | M2 | 0.03 % | 6.22 % | 0.16 % | 3.71 % |
 | M3 | 0.13 % | 9.93 % | 0.58 % | 6.82 % |
 
-`scripts/check_kernel_label_noise.py` (finite-difference step sweep
-1e-6/1e-5/1e-4) rules out label noise: drift medians are 0.02–0.06 % with
-p95 ≤ 3.4 %, so the 5 % target is physically reachable. Kernel-labelled
-training models are also kind-balanced (LVL 15 %, matching the train split).
-The remaining cause is approximation capacity: thin anomalous zones (LVL and
-coupled kinds) produce sharp, high-amplitude sensitivity kernels that one
-shared MLP fits poorly. The hybrid inverter consumes the network Jacobian
-(`torch.func.jacfwd`), so these rows are inversion sensitivities and matter.
+The earlier finite-difference sweep (1e-6/1e-5/1e-4) reported drift medians
+of 0.02–0.06% and p95 <=3.4%. That script aggregated all valid frequencies
+of each mode, so these statistics do not establish the accuracy of individual
+failing rows. Its old test-split default also made it unsuitable for choosing
+training changes. The row-level validation audit below supersedes that check.
+Kernel-labelled training models have the expected kind mix (LVL 15%), but
+that alone neither certifies coverage nor proves a network capacity limit.
+The hybrid inverter consumes the network Jacobian (`torch.func.jacfwd`),
+so these derivative errors matter for inversion.
 
-**Next run: profile-feature conditioning.** `PROFILE_FEATURES=1` appends
+**Historical experiment: profile-feature conditioning.** `PROFILE_FEATURES=1` appends
 anomaly-localizing features (per-layer deficit vs running maximum, excess vs
 future minimum, anomaly depths and contrasts — 46 dims) computed inside the
 network, so the vs-only interface (inversion, evaluation) is unchanged and
@@ -569,6 +569,71 @@ it can drop when the bank is refreshed and newly difficult rows enter it.
 Judge improvement using the unchanged validation kernel rate and the >=99%
 curve constraint. This method has not yet been validated on the remote GPU
 run and is not a guarantee of reaching acceptance.
+
+### Completed v4 and a targeted label consistency audit
+
+The v4 `best-kernel.pt` is epoch 48, with validation curve pass rate 99.52%
+and kernel pass rate 97.590270%. It is the best available kernel candidate
+from these experiments, while remaining short of 99% acceptance. Compared
+with v2 `last.pt`, the kernel gain is 0.058374 percentage points: a net decrease
+of 2,795 failed rows, or 2.37% of v2's failures. Aggregate counts do not reveal
+which individual rows became successes or regressed.
+
+| v4 kernel-labelled split | models | valid rows | failed rows | kernel pass rate |
+| --- | ---: | ---: | ---: | ---: |
+| train | 200,000 | 95,760,563 | 1,703,579 | 98.2210% |
+| validation | 10,000 | 4,788,089 | 115,380 | 97.5903% |
+
+Training is also below target. The 0.6307 percentage-point train/validation
+gap is not evidence that generalization is the only bottleneck, and these
+metrics do not distinguish optimization, conflicting labels, and capacity.
+On validation, M2/M3 account for 78.48% of failures, and low/coupled models
+for 98.64%. There are still 28,266 rows with error >=20% (v2: 28,388).
+Reaching 99% requires a net reduction of at least 67,500 failures. Even fixing
+all 59,408 rows in the 5–10% band would only reach 98.8310%.
+
+Before another long run, audit the actual worst rows recorded in the JSON:
+
+```bash
+git pull --ff-only
+PYTHONPATH=src python scripts/check_kernel_label_noise.py \
+  --split validation \
+  --diagnostics results/forward-kernel-corrected-rows-v4/diagnostics-validation.json \
+  --output results/forward-kernel-corrected-rows-v4/label-audit-validation.json
+```
+
+The audit uses CPU physics and does not require the neural checkpoint or a
+GPU. It loads only the models needed for the diagnostic's worst rows and
+four random reference models per kind. Each reference model supplies one
+valid row per mode. These are background references, not verified neural
+successes; neither group estimates population prevalence. IDs and split
+must agree with the diagnostic. No labels or acceptance masks are changed.
+
+The report compares individual 20-component kernel rows:
+
+- `stored_vs_recomputed`: training's float16 label versus fresh float64
+  evaluation at the same stored phase velocity, alongside `float16_rounding`.
+- `step_1e-6_at_stored_root` and `step_1e-4_at_stored_root`: changes relative
+  to the existing 1e-5 step, without aggregating over other frequencies.
+- `resolved_vs_stored`: kernel after re-searching all four roots with the
+  consensus solver and root tolerance 1e-11, versus the training label.
+  `phase_relative_shift` records the accompanying phase change. The two
+  step comparisons are repeated at the resolved root.
+
+Root tolerance controls numerical root refinement, as documented for the
+solver's [SciPy TOMS748](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.toms748.html)
+routine; it does not guarantee that a search found every physical branch.
+Failed/unresolved checks remain explicit in `unresolved_rows`. All these
+checks share the existing secular function, so agreement is not independent
+physical validation. A difference at the larger 1e-4 step alone also does not
+establish an error in the 1e-5 label; inspect smaller-step convergence and
+root changes before deciding on corrections.
+
+If severe failing labels disagree, first investigate their roots, mode
+identities and derivative convergence. If these checks agree, the next
+controlled experiment is fitting a fixed small set of difficult **training**
+models to test optimization/representation limits before expanding the full
+network or dataset. The v4 metrics alone do not justify either diagnosis.
 
 ### Earlier tuning knobs (historical; validate corrected gradients first)
 

@@ -193,20 +193,40 @@ def apply_corrections(
 
 
 def load_kernel_rows(
-    kernel_dir: Path, split: Split, corrections: Path | None = None
+    kernel_dir: Path, split: Split, corrections: Path | None = None,
+    *, sample_ids: NDArray | None = None,
 ) -> dict[str, NDArray]:
     """Load kernel labels; kernels are held as float16 to bound memory.
 
     Labels are written file by file into one preallocated array, so peak memory
-    stays close to the final ``rows x 4 x 120 x 20`` float16 array.
+    stays close to the final ``rows x 4 x 120 x 20`` float16 array. An explicit
+    sample-ID subset reads only those models, in shard order, for small audits.
     """
     files = sorted((Path(kernel_dir) / split).glob("kernels-*.h5"))
     if not files:
         raise FileNotFoundError(f"no kernel files for split {split!r}")
-    counts = []
+    requested = None if sample_ids is None else np.asarray(sample_ids)
+    if requested is not None and (
+        requested.ndim != 1 or not len(requested) or np.any(requested < 0)
+        or len(np.unique(requested)) != len(requested)
+    ):
+        raise ValueError("sample_ids must be a nonempty vector of unique nonnegative IDs")
+    counts, selections, found = [], [], []
     for path in files:
         with h5py.File(path, "r") as handle:
-            counts.append(int(handle["sample_id"].shape[0]))
+            if requested is None:
+                counts.append(int(handle["sample_id"].shape[0]))
+                selections.append(None)
+            else:
+                ids = np.asarray(handle["sample_id"], dtype=np.uint64)
+                index = np.flatnonzero(np.isin(ids, requested))
+                selections.append(index)
+                counts.append(len(index))
+                found.extend(ids[index].tolist())
+    if requested is not None and (
+        len(found) != len(requested) or set(found) != set(requested.tolist())
+    ):
+        raise ValueError("requested kernel sample IDs are missing or duplicated in the split")
     total = sum(counts)
     with h5py.File(files[0], "r") as handle:
         kernel_shape = handle["kernel"].shape[1:]
@@ -219,12 +239,19 @@ def load_kernel_rows(
         "kernel_mask": np.empty((total, *kernel_shape[:2]), dtype=np.bool_),
     }
     offset = 0
-    for path, count in zip(files, counts, strict=True):
+    for path, count, index in zip(files, counts, selections, strict=True):
+        if count == 0:
+            continue
         part = slice(offset, offset + count)
         with h5py.File(path, "r") as handle:
             for key in ("sample_id", "vs", "phase_velocity", "valid_mask"):
-                rows[key][part] = np.asarray(handle[key])
-            kernel = np.asarray(handle["kernel"], dtype=np.float32)
+                rows[key][part] = np.asarray(
+                    handle[key] if index is None else handle[key][index]
+                )
+            kernel = np.asarray(
+                handle["kernel"] if index is None else handle["kernel"][index],
+                dtype=np.float32,
+            )
         finite = np.isfinite(kernel).all(axis=-1)
         kernel[~finite] = 0.0
         rows["kernel"][part] = kernel

@@ -1,116 +1,96 @@
-"""Estimate the noise floor of physical kernel labels.
+"""Audit individual failing kernel rows and random reference rows, read-only.
 
-Physical kernels are finite differences of the secular determinant with
-DEFAULT_STEP_KM_S = 1e-5. If recomputing labels at other step sizes changes
-them by ~5-10% relative L2, the 99%-within-5% acceptance target is
-unreachable for those rows no matter how well the network trains.
-
-Recomputes kernels for a stratified sample of test-split models at three
-finite-difference steps and reports, per model kind and mode, how much the
-labels themselves move. Also prints the kind distribution of the
-kernel-labelled train models (class-imbalance check).
-
-Usage (on the GPU machine, from the repo root):
-    python3 scripts/check_kernel_label_noise.py \
-        --dataset-dir data/production --kernel-dir data/kernels \
-        --cache-dir data/cache --corrections results/kissing-repair/corrections.npz
+Defaults to validation. A diagnostic JSON supplies the worst failing rows;
+four background models per kind add one valid row per mode. Only the selected
+models' labels are loaded. This is a targeted consistency check, not an
+estimate of dataset-wide label accuracy or a proof of physical correctness.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
+from numba import set_num_threads
 
-from swave.kernel_training import (
-    apply_corrections,
-    load_kernel_rows,
-    load_split_rows,
+from swave.kernel_audit import (
+    STEPS,
+    audit_kernel_rows,
+    kernel_model_metadata,
+    select_audit_rows,
+    summarize_audit,
 )
-from swave.kernels import sensitivity_kernels
-
-KIND_NAMES = ["normal", "low velocity", "high velocity", "coupled HVL+LVL"]
-STEPS = [1e-6, 1e-5, 1e-4]
-REFERENCE_STEP = 1e-5
-FREQ_STEP_HZ = 0.5
-PER_KIND = 75
+from swave.kernel_training import load_kernel_rows
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-dir", default="data/production", type=Path)
     parser.add_argument("--kernel-dir", default="data/kernels", type=Path)
-    parser.add_argument("--cache-dir", default="data/cache", type=Path)
+    parser.add_argument("--cache-dir", default="data/cache", type=Path,
+                        help="Accepted for compatibility; reads shard metadata directly.")
     parser.add_argument("--corrections", default="results/kissing-repair/corrections.npz", type=Path)
+    parser.add_argument("--split", choices=("train", "validation"), default="validation")
+    parser.add_argument("--diagnostics", type=Path, help="JSON from diag_kernel_failures.py")
+    parser.add_argument("--reference-models-per-kind", type=int, default=4)
+    parser.add_argument("--seed", type=int, default=20261007)
+    parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-
-    rows = load_split_rows(args.dataset_dir, "train", args.cache_dir)
-    apply_corrections(rows, args.corrections)
-    kinds_train, counts_train = np.unique(rows["model_kind"], return_counts=True)
-    print("train split kinds:", dict(zip(
-        [KIND_NAMES[k] for k in kinds_train.tolist()], counts_train.tolist())))
-
-    kernel_rows = load_kernel_rows(args.kernel_dir, "test", args.corrections)
-    test_rows = load_split_rows(args.dataset_dir, "test", args.cache_dir)
-    kind_by_id = dict(zip(test_rows["sample_id"].tolist(), test_rows["model_kind"].tolist()))
-    kinds_test = np.array([kind_by_id[int(s)] for s in kernel_rows["sample_id"]])
-
-    train_kernel_ids = load_kernel_rows(args.kernel_dir, "train", args.corrections)["sample_id"]
-    kind_by_id_train = dict(zip(rows["sample_id"].tolist(), rows["model_kind"].tolist()))
-    kinds_kernel_train = np.array([kind_by_id_train[int(s)] for s in train_kernel_ids])
-    kinds_k, counts_k = np.unique(kinds_kernel_train, return_counts=True)
-    print("kernel-labelled train kinds:", dict(zip(
-        [KIND_NAMES[k] for k in kinds_k.tolist()], counts_k.tolist())))
-
-    # stratified sample of test models
-    rng = np.random.default_rng(0)
-    picked = np.concatenate([
-        rng.choice(np.where(kinds_test == k)[0], size=min(PER_KIND, int((kinds_test == k).sum())),
-                   replace=False)
-        for k in range(len(KIND_NAMES))
+    if args.reference_models_per_kind < 0 or args.threads < 1:
+        parser.error("reference-models-per-kind must be nonnegative; threads must be positive")
+    diagnostic = json.loads(args.diagnostics.read_text()) if args.diagnostics else None
+    if diagnostic is not None and diagnostic.get("split") != args.split:
+        parser.error("diagnostic split does not match --split")
+    targets = diagnostic["worst_rows"] if diagnostic is not None else []
+    set_num_threads(args.threads)
+    ids, kinds = kernel_model_metadata(args.dataset_dir, args.kernel_dir, args.split)
+    rng = np.random.default_rng(args.seed)
+    reference_ids = np.concatenate([
+        rng.choice(ids[kinds == kind], min(args.reference_models_per_kind,
+                                         int((kinds == kind).sum())), replace=False)
+        for kind in np.unique(kinds)
     ])
+    requested = np.unique(np.concatenate([
+        reference_ids, np.asarray([row["sample_id"] for row in targets], dtype=np.uint64),
+    ]))
+    if not len(requested):
+        parser.error("no audit models selected")
+    rows = load_kernel_rows(args.kernel_dir, args.split, args.corrections, sample_ids=requested)
+    chosen = select_audit_rows(rows, targets, reference_ids, seed=args.seed)
+    print(json.dumps({"label_audit": {
+        "split": args.split, "models": len(requested), "rows": len(chosen),
+        "diagnostic_rows": sum(row["selection"] == "diagnostic_failure" for row in chosen),
+        "step_sizes_km_s": STEPS, "root_strategy": "consensus", "root_tolerance": 1e-11,
+    }}), flush=True)
 
-    vs = kernel_rows["vs"][picked].astype(np.float64)
-    phase = kernel_rows["phase_velocity"][picked].astype(np.float64)
-    mask = kernel_rows["valid_mask"][picked]
-    freqs = np.arange(FREQ_STEP_HZ, 60.0 + FREQ_STEP_HZ / 2, FREQ_STEP_HZ)
-    assert freqs.size == phase.shape[-1], (freqs.size, phase.shape)
+    def progress(done, total):
+        if done % 8 == 0 or done == total:
+            print(json.dumps({"audit_progress": {"completed": done, "total": total}}), flush=True)
 
-    kernels = {}
-    for step in STEPS:
-        print(f"computing kernels at step {step:.0e} ...", flush=True)
-        kernels[step] = sensitivity_kernels(vs, phase, mask, freqs, step=step)
-
-    ref = kernels[REFERENCE_STEP]
-    for kind in range(len(KIND_NAMES)):
-        sel = np.where(kinds_test[picked] == kind)[0]
-        for mode in range(phase.shape[1]):
-            disagreements, low_freq = [], []
-            for i in sel:
-                m = mask[i, mode]
-                if not m.any():
-                    continue
-                target = ref[i, mode, m]  # (freqs, layers)
-                n = np.linalg.norm(target)
-                if n < 1e-12:
-                    continue
-                for step in STEPS:
-                    if step == REFERENCE_STEP:
-                        continue
-                    d = np.linalg.norm(kernels[step][i, mode, m] - target) / n
-                    disagreements.append(d)
-                    if (freqs[m] < 2.0).any():
-                        low = freqs[m] < 2.0
-                        nl = np.linalg.norm(target[low])
-                        if nl >= 1e-12:
-                            low_freq.append(np.linalg.norm(kernels[step][i, mode, m][low] - target[low]) / nl)
-            if disagreements:
-                d = np.array(disagreements)
-                lf = np.array(low_freq) if low_freq else np.array([np.nan])
-                print(f"{KIND_NAMES[kind]:<18} M{mode}: step-sweep label drift "
-                      f"median {100*np.median(d):6.3f}%  p95 {100*np.percentile(d,95):6.3f}%  | "
-                      f"below 2 Hz median {100*np.nanmedian(lf):6.3f}%")
+    records = audit_kernel_rows(rows, chosen, progress=progress)
+    kind_by_id = dict(zip(ids.tolist(), kinds.tolist(), strict=True))
+    for record in records:
+        record["model_kind"] = int(kind_by_id[record["sample_id"]])
+    report = {
+        "split": args.split, "diagnostics": str(args.diagnostics) if args.diagnostics else None,
+        "checkpoint": diagnostic.get("checkpoint") if diagnostic else None,
+        "configuration": {key: str(value) if isinstance(value, Path) else value
+                          for key, value in vars(args).items()},
+        "step_sizes_km_s": STEPS, "root_strategy": "consensus", "root_tolerance": 1e-11,
+        "summary": summarize_audit(records), "rows": records,
+        "note": "Targeted failures and stratified random references do not estimate population "
+                "prevalence. All checks share the existing secular function. Agreement does not "
+                "certify physical correctness; disagreements do not automatically justify "
+                "changing labels or acceptance masks.",
+    }
+    print(json.dumps({"label_audit_summary": report["summary"]}, allow_nan=False), flush=True)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+        print(f"saved {args.output}")
     return 0
 
 
