@@ -119,6 +119,10 @@ fi
 [ -f "$OUTPUT_DIR/best.pt" ] || [ -f "$OUTPUT_DIR/last.pt" ] || fail "fine-tuning produced no checkpoint"
 final="$OUTPUT_DIR/best.pt"
 [ -f "$final" ] || final="$OUTPUT_DIR/last.pt"
+if [ -f "$OUTPUT_DIR/best-kernel.pt" ]; then
+  final="$OUTPUT_DIR/best-kernel.pt"
+fi
+log "selected checkpoint: $final"
 
 log "stage 3: evaluation and figures -> $RESULTS_DIR"
 "$PYTHON" scripts/evaluate_forward_kernels.py \

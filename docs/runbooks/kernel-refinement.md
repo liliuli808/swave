@@ -426,6 +426,74 @@ failed run's `last.pt` and optimizer are not restored. Preserve the failed
 directory for diagnosis; do not delete it or overwrite the kw3 checkpoint.
 The expected initial score is about 0.03026. A score of 2 now stops immediately.
 
+### Corrected v2 result: diagnose the remaining failures before extending training
+
+The 50-epoch run reported on 2026-10-10 completed normally. Final **test**
+evaluation of the checkpoint chosen by the original summed score was:
+
+| checkpoint | curves within 1% | kernel rows within 5% | kernel median |
+| --- | --- | --- | --- |
+| kw3 base | 99.5840% | 97.5617% | 0.232% |
+| corrected v2 | 99.6060% | 97.5884% | 0.226% |
+
+The kernel pass rate improved only 0.0267 percentage points. Readable validation
+records at epochs 43, 44, 46 and 48 remain around 97.53%, and the final learning
+rate reached 1e-6. These results do not justify assuming that simply extending
+this configuration to 500 epochs will meet 99%. The remote epoch-49 text was
+partly corrupted; use the original history JSON for the exact final metrics.
+
+First inspect the actual v2 validation failures, using the **run directory**
+to compare the validation metrics of all available saved checkpoints:
+
+```bash
+PYTHONPATH=src python scripts/diag_kernel_failures.py \
+  --checkpoint runs/kernel-corrected-grad-v2 \
+  --split validation --device cuda \
+  --output results/forward-kernel-corrected-grad-v2/diagnostics-validation.json \
+  > kernel-v2-diagnostics.out 2>&1
+```
+
+Use `tail -n 80 kernel-v2-diagnostics.out` to view the report. This reads existing
+weights and labels; it does not start another training run or overwrite them.
+The directory form selects the strongest kernels among available checkpoints
+whose validation curve pass rate is at least 99%. A file path instead diagnoses
+that exact checkpoint. The report includes:
+
+* The best summed-score epoch and best feasible kernel epoch from history,
+  plus metrics for the last five training epochs.
+* Which weights are still available (`best.pt`, `last.pt`, `best-kernel.pt`).
+  A better historical epoch cannot be recovered if its weights were not saved.
+* Failure counts and rates by mode, model kind and frequency, using **valid
+  kernel rows** as the denominator. The old kind table included invalid cells
+  in the denominator, so its failure rates should not be reused as exact rates.
+* Error bands below 1%, 1–3%, 3–5%, 5–10%, 10–20% and at least 20%, physical
+  kernel norms, finite-error quantiles and the worst failing sample/row IDs.
+
+The diagnostic defaults to validation, supports CUDA, and counts exactly 5%
+as a failure, matching the evaluator's strict `<0.05` test. Nonfinite predicted
+errors count as failures and are reported separately from finite quantiles.
+Keep test data for final acceptance. Earlier claims assigning the residual
+tail solely to capacity or label noise are not established by these v2 results.
+
+New training runs retain two independent best checkpoints: `best.pt` minimizes
+the historical summed score, while `best-kernel.pt` maximizes kernel pass rate
+subject to validation curve pass rate >=99% (curve rate breaks exact ties).
+The pipeline evaluates `best-kernel.pt` when it exists. This prevents curve
+improvement from compensating for kernel deterioration during selection, but
+does not itself improve the trained weights. Resume preserves this checkpoint
+and can seed it from available legacy weights and their matching history rows.
+
+Choose the next experiment using the validation report. If failures have
+ordinary physical norms and appear learnable, the first controlled comparison
+is `KERNEL_WEIGHT=3`, keeping the same kw3 base, 50 epochs, batch size, two
+directions, learning-rate schedule and hard-example powers at zero. Use a new
+output directory and compare validation kernel improvement while retaining the
+curve constraint. Do not simultaneously increase the weight, enable hard
+sampling, add directions and extend the epoch count. If improvement remains
+flat, compare more directions at the same batch size; targeted row weighting
+or label checks should follow the observed failure groups. Do not relax the
+acceptance masks or thresholds to remove the remaining failures.
+
 ### Earlier tuning knobs (historical; validate corrected gradients first)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.

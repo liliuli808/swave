@@ -405,6 +405,19 @@ def _selection_score(metrics: dict[str, object]) -> float:
     )
 
 
+def kernel_checkpoint_key(metrics: dict[str, object]) -> tuple[float, float] | None:
+    """Rank kernel agreement subject to the 99% curve acceptance constraint.
+
+    Higher is better. Curve agreement breaks exact kernel ties; it cannot
+    compensate for worse kernels once the curve constraint is satisfied.
+    """
+    curves = float(metrics["value"]["samples_all_within_1pct"])
+    kernels = float(metrics["kernel"]["rows_within_5pct"])
+    if not (math.isfinite(curves) and math.isfinite(kernels)):
+        return None
+    return (kernels, curves) if curves >= 0.99 else None
+
+
 def _save(path: Path, payload: dict[str, object]) -> None:
     temporary = path.with_suffix(f"{path.suffix}.tmp")
     torch.save(payload, temporary)
@@ -526,20 +539,25 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     best_path = config.output_dir / "best.pt"
+    best_kernel_path = config.output_dir / "best-kernel.pt"
     history_path = config.output_dir / "history.json"
     history: list[dict[str, object]] = []
     start_epoch = 0
     best_score = float("inf")
+    best_kernel_key: tuple[float, float] | None = None
 
-    def checkpoint(epoch: int, score: float) -> dict[str, object]:
+    def checkpoint(
+        epoch: int, score: float, validation: dict[str, object]
+    ) -> dict[str, object]:
         return {
             **{key: value for key, value in base.items()
-               if key not in {"model", "optimizer", "scheduler"}},
+               if key not in {"model", "optimizer", "scheduler", "selection"}},
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "epoch": epoch,
             "best_score": score,
+            "validation": validation,
             "architecture": architecture,
             "kernel_training_config": config.to_dict(),
             "base_checkpoint": str(config.base_checkpoint),
@@ -549,6 +567,31 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
                 "layer_norm": "elementary_ops_v1",
             },
         }
+
+    def retain_kernel_checkpoint(payload: dict[str, object]) -> None:
+        nonlocal best_kernel_key
+        validation = payload.get("validation")
+        if validation is None:
+            # Old checkpoints did not embed their validation metrics. Only
+            # recover metrics for an epoch whose weights are actually present.
+            validation = next((
+                row["validation"] for row in history
+                if row["epoch"] == payload["epoch"]
+            ), None)
+        if validation is None:
+            return
+        key = kernel_checkpoint_key(validation)
+        if key is not None and (best_kernel_key is None or key > best_kernel_key):
+            best_kernel_key = key
+            _save(best_kernel_path, {
+                **payload,
+                "validation": validation,
+                "selection": {
+                    "metric": "kernel.rows_within_5pct",
+                    "minimum_curve_pass_rate": 0.99,
+                    "tie_breaker": "value.samples_all_within_1pct",
+                },
+            })
 
     if last_path.exists():
         payload = torch.load(last_path, map_location="cpu", weights_only=False)
@@ -563,6 +606,17 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
                 record for record in json.loads(history_path.read_text())["epochs"]
                 if record["epoch"] < start_epoch
             ]
+        if best_kernel_path.exists():
+            saved = torch.load(best_kernel_path, map_location="cpu", weights_only=False)
+            best_kernel_key = kernel_checkpoint_key(saved["validation"])
+            del saved
+        # Seed the new criterion when resuming an older run. Unsaved historical
+        # epochs cannot be reconstructed from history.json.
+        if best_path.exists():
+            retain_kernel_checkpoint(torch.load(
+                best_path, map_location="cpu", weights_only=False,
+            ))
+        retain_kernel_checkpoint(payload)
     else:
         model.eval()
         initial = evaluate_rows(forward, validation_rows)
@@ -584,7 +638,12 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
         history.append({"epoch": -1, "score": best_score, "validation": initial})
         # A fine-tune can regress for every epoch. Keep the actual initial best,
         # rather than falling back to a worse last.pt if no update beats it.
-        _save(best_path, checkpoint(-1, best_score))
+        # A fresh run also replaces artifacts from an interrupted initial-only
+        # run, even if its new initial model misses the curve constraint.
+        best_kernel_path.unlink(missing_ok=True)
+        payload = checkpoint(-1, best_score, initial)
+        _save(best_path, payload)
+        retain_kernel_checkpoint(payload)
 
     # Per-sample hard-example weights from the latest relative error.
     sample_weight = torch.ones(len(train_vs), device=device)
@@ -678,8 +737,9 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
             "validation": metrics,
         }
         history.append(record)
-        payload = checkpoint(epoch, min(best_score, score))
+        payload = checkpoint(epoch, min(best_score, score), metrics)
         _save(last_path, payload)
+        retain_kernel_checkpoint(payload)
         if score < best_score:
             best_score = score
             _save(best_path, payload)
@@ -702,4 +762,6 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
             ),
             flush=True,
         )
+    if best_kernel_path.exists():
+        return best_kernel_path
     return best_path if best_path.exists() else last_path

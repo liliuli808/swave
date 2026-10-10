@@ -8,7 +8,11 @@ import pytest
 import torch
 
 from swave import kernel_training
-from swave.kernel_training import KernelTrainingConfig, train_with_kernels
+from swave.kernel_training import (
+    KernelTrainingConfig,
+    kernel_checkpoint_key,
+    train_with_kernels,
+)
 from swave.network import FourHeadForwardModel
 from swave.splits import SPLIT_POLICY
 
@@ -164,3 +168,78 @@ def test_required_warm_start_accepts_good_checkpoint_and_reports_source(
     assert records[1]["epoch"] == -1
     assert records[1]["samples_all_within_1pct"] == 1.0
     assert records[1]["kernel_rows_within_5pct"] == 1.0
+
+
+def _metrics(curves: float, kernels: float) -> dict:
+    return {
+        "value": {"samples_all_within_1pct": curves},
+        "kernel": {"rows_within_5pct": kernels, "median_relative_l2": 0.002},
+    }
+
+
+def test_kernel_selection_keeps_curve_constraint_and_does_not_trade_off_kernels(
+    kernel_run, monkeypatch: pytest.MonkeyPatch
+):
+    config, _, _ = kernel_run
+    config.epochs = 3
+    metrics = iter([
+        _metrics(0.9951, 0.9746),
+        _metrics(0.9953, 0.9749),  # best feasible kernels
+        _metrics(0.9960, 0.9748),  # better sum, worse kernels
+        _metrics(0.9899, 0.9990),  # smallest sum, but curves miss acceptance
+    ])
+    monkeypatch.setattr(kernel_training, "evaluate_rows", lambda *args: next(metrics))
+    path = train_with_kernels(config)
+    assert path.name == "best-kernel.pt"
+    selected = torch.load(path, weights_only=False)
+    assert selected["epoch"] == 0
+    assert selected["validation"]["kernel"]["rows_within_5pct"] == 0.9749
+    assert selected["selection"]["minimum_curve_pass_rate"] == 0.99
+    legacy = torch.load(config.output_dir / "best.pt", weights_only=False)
+    assert legacy["epoch"] == 2
+
+    # A later resume with only weaker kernels must retain the saved winner.
+    config.epochs = 4
+    monkeypatch.setattr(kernel_training, "evaluate_rows",
+                        lambda *args: _metrics(0.997, 0.9748))
+    resumed = train_with_kernels(config)
+    assert torch.load(resumed, weights_only=False)["epoch"] == 0
+
+
+def test_legacy_resume_recovers_only_checkpoints_whose_weights_still_exist(
+    kernel_run, monkeypatch: pytest.MonkeyPatch
+):
+    config, _, _ = kernel_run
+    config.epochs = 2
+    metrics = iter([
+        _metrics(0.9951, 0.9746), _metrics(0.9953, 0.9749),
+        _metrics(0.9960, 0.9748),
+    ])
+    monkeypatch.setattr(kernel_training, "evaluate_rows", lambda *args: next(metrics))
+    train_with_kernels(config)
+    (config.output_dir / "best-kernel.pt").unlink()
+    for filename in ("best.pt", "last.pt"):
+        path = config.output_dir / filename
+        saved = torch.load(path, weights_only=False)
+        del saved["validation"]
+        torch.save(saved, path)
+
+    config.epochs = 3
+    monkeypatch.setattr(kernel_training, "evaluate_rows",
+                        lambda *args: _metrics(0.997, 0.9747))
+    selected = torch.load(train_with_kernels(config), weights_only=False)
+    # Epoch 0 was better, but legacy best.pt and last.pt both contain epoch 1.
+    assert selected["epoch"] == 1
+    assert selected["validation"]["kernel"]["rows_within_5pct"] == 0.9748
+
+
+@pytest.mark.parametrize("curves,kernels", [(0.9899, 1), (float("nan"), 1),
+                                             (1, float("nan")), (1, float("inf"))])
+def test_kernel_selection_rejects_infeasible_or_nonfinite_metrics(curves, kernels):
+    assert kernel_checkpoint_key(_metrics(curves, kernels)) is None
+
+
+def test_kernel_selection_accepts_boundary_and_breaks_exact_ties_by_curves():
+    assert kernel_checkpoint_key(_metrics(0.99, 0.97)) == (0.97, 0.99)
+    assert (kernel_checkpoint_key(_metrics(0.995, 0.97))
+            > kernel_checkpoint_key(_metrics(0.99, 0.97)))
