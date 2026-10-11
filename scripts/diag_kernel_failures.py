@@ -17,6 +17,7 @@ from swave.kernel_diagnostics import summarize_history, summarize_kernel_errors
 from swave.kernel_training import (
     Normalizer,
     kernel_checkpoint_key,
+    kernel_fraction_mask,
     load_kernel_rows,
     load_split_rows,
     network_kernels,
@@ -123,6 +124,19 @@ def main() -> int:
         error, norm, kernel_rows["kernel_mask"], kernel_rows["sample_id"], kinds,
         np.arange(error.shape[-1], dtype=np.float64) * 0.5 + 0.5,
     )
+    training = payload.get("kernel_training_config") or {}
+    fraction = float(training.get("kernel_train_fraction", 1.0))
+    if (args.split == "train" and fraction < 1
+            and training.get("kernel_train_split", "train") == "train"):
+        # Rebuilt from the saved config exactly as training chose its subset.
+        seen = kernel_fraction_mask(kernel_rows["sample_id"], fraction, int(training["seed"]))
+        report["by_training_subset"] = {"fraction": fraction}
+        for name, keep in (("seen", seen), ("unseen", ~seen)):
+            report["by_training_subset"][name] = summarize_kernel_errors(
+                error[keep], norm[keep], kernel_rows["kernel_mask"][keep],
+                kernel_rows["sample_id"][keep], kinds[keep],
+                np.arange(error.shape[-1], dtype=np.float64) * 0.5 + 0.5,
+            )
     report.update({
         "checkpoint": str(checkpoint),
         "available_checkpoints": candidates,
@@ -139,6 +153,15 @@ def main() -> int:
           f"failed {overall['failed_rows']}/{overall['rows']}")
     print(f"finite error bands: {json.dumps(overall['error_band_counts'])}; "
           f"nonfinite rows: {overall['nonfinite_rows']}")
+    subsets = report.get("by_training_subset")
+    if subsets is not None:
+        print(f"\ntraining subset (fraction {subsets['fraction']}):")
+        for name in ("seen", "unseen"):
+            group = subsets[name]
+            print(f"  {name:<6} pass {_percent(group['overall']['rows_within_5pct'])}; "
+                  f"failed {group['overall']['failed_rows']}/{group['overall']['rows']}")
+            for kind, values in group["by_kind"].items():
+                print(f"    {kind:<18} pass {_percent(values['rows_within_5pct']):>10}")
     for mode, group in report["by_mode"].items():
         print(f"\nM{mode}: pass {_percent(group['rows_within_5pct'])}, "
               f"failed {group['failed_rows']}/{group['rows']}")

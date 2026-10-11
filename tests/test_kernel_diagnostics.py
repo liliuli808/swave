@@ -133,3 +133,44 @@ def test_run_directory_selection_cannot_pick_an_unsaved_historical_winner(tmp_pa
     assert selected == tmp_path / "last.pt"
     assert {row["epoch"] for row in candidates} == {1, 2}
     assert all(row["eligible"] for row in candidates)
+
+
+def test_train_split_separates_models_seen_and_unseen_by_a_fraction_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from swave.kernel_training import kernel_fraction_mask
+
+    module = _diagnostic_cli()
+    model = FourHeadForwardModel(width=8, blocks=1)
+    checkpoint = tmp_path / "half.pt"
+    torch.save({
+        "model": model.state_dict(), "architecture": {"width": 8, "blocks": 1},
+        "input_mean": np.zeros(20), "input_std": np.ones(20),
+        "target_mean": np.ones((4, 1)), "target_std": np.full((4, 1), 0.1),
+        "split_policy": SPLIT_POLICY, "epoch": 3,
+        "kernel_training_config": {"kernel_train_fraction": 0.5, "seed": 11,
+                                   "kernel_train_split": "train"},
+    }, checkpoint)
+    ids = np.array([5, 9, 2, 7], dtype=np.uint64)
+    rows = {
+        "sample_id": ids, "model_kind": np.array([0, 1, 2, 3]),
+        "vs": np.linspace(0.5, 2.0, 80, dtype=np.float32).reshape(4, 20),
+        "phase_velocity": np.ones((4, 4, 120), dtype=np.float32),
+        "valid_mask": np.ones((4, 4, 120), dtype=bool),
+        "kernel": np.ones((4, 4, 120, 20), dtype=np.float16),
+        "kernel_mask": np.ones((4, 4, 120), dtype=bool),
+    }
+    monkeypatch.setattr(module, "load_split_rows", lambda *args: rows)
+    monkeypatch.setattr(module, "load_kernel_rows", lambda *args: rows)
+    output = tmp_path / "diagnostics.json"
+    monkeypatch.setattr(sys, "argv", [
+        module.__file__, "--checkpoint", str(checkpoint), "--split", "train",
+        "--output", str(output), "--threads", "1",
+    ])
+    assert module.main() == 0
+    subsets = json.loads(output.read_text())["by_training_subset"]
+    seen = set(ids[kernel_fraction_mask(ids, 0.5, 11)].tolist())
+    assert subsets["fraction"] == 0.5
+    assert subsets["seen"]["overall"]["rows"] == subsets["unseen"]["overall"]["rows"] == 960
+    assert {row["sample_id"] for row in subsets["seen"]["worst_rows"]} <= seen
+    assert not {row["sample_id"] for row in subsets["unseen"]["worst_rows"]} & seen

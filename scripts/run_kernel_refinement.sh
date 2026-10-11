@@ -147,7 +147,8 @@ log "stage 3: evaluation and figures -> $RESULTS_DIR"
 cp "$OUTPUT_DIR/history.json" "$RESULTS_DIR/finetune-history.json"
 
 log "stage 4: acceptance check"
-"$PYTHON" - "$RESULTS_DIR/summary.json" <<'EOF'
+# Also kept next to summary.json, so the table survives a lost console log.
+"$PYTHON" - "$RESULTS_DIR/summary.json" <<'EOF' | tee "$RESULTS_DIR/acceptance.txt"
 import json, sys
 summary = json.load(open(sys.argv[1]))
 rows = []

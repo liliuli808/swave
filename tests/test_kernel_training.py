@@ -11,6 +11,7 @@ from swave import kernel_training
 from swave.kernel_training import (
     KernelTrainingConfig,
     kernel_checkpoint_key,
+    kernel_fraction_mask,
     select_kernel_fraction,
     train_with_kernels,
 )
@@ -331,3 +332,77 @@ def test_training_uses_and_reports_the_kernel_subset(
     assert subset["fraction"] == 0.5
     assert subset["models"] == 2 and subset["available_models"] == 4
     assert len(subset["sample_id_checksum"]) == 16
+
+
+def test_kernel_fraction_mask_matches_the_selected_training_subset():
+    rows = _subset_rows(40)
+    mask = kernel_fraction_mask(rows["sample_id"], 0.5, seed=3)
+    assert mask.sum() == 20
+    assert (set(rows["sample_id"][mask].tolist())
+            == set(select_kernel_fraction(rows, 0.5, seed=3)["sample_id"].tolist()))
+
+
+def _blow_up_value_loss(monkeypatch, bad_calls):
+    """Scale the value loss by 1e6 on the given (0-based) call numbers."""
+    original = kernel_training.relative_value_loss
+    calls = []
+
+    def scaled(*args):
+        loss = original(*args)
+        calls.append(None)
+        return loss * 1e6 if len(calls) - 1 in bad_calls else loss
+
+    monkeypatch.setattr(kernel_training, "relative_value_loss", scaled)
+
+
+def test_divergent_epoch_is_rolled_back_and_retried(
+    kernel_run, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    config, _, _ = kernel_run
+    config.epochs = 3
+    # One step per epoch and two value-loss calls per step: calls 2-3 are epoch 1.
+    _blow_up_value_loss(monkeypatch, {2, 3})
+    train_with_kernels(config)
+    output = [json.loads(line) for line in capsys.readouterr().out.splitlines()
+              if line.startswith("{")]
+    rollbacks = [row["divergence_rollback"] for row in output
+                 if "divergence_rollback" in row]
+    assert [row["epoch"] for row in rollbacks] == [1]
+    history = json.loads((config.output_dir / "history.json").read_text())["epochs"]
+    assert [record["epoch"] for record in history] == [-1, 0, 1, 2]
+    assert history[-1]["rollbacks"] == 1
+    # The accepted epoch 1 is the retry, not the 1e6-scaled attempt.
+    assert history[2]["value_loss"] < 100 * history[1]["value_loss"]
+    assert torch.load(config.output_dir / "last.pt", weights_only=False)["epoch"] == 2
+
+
+def test_repeated_divergence_stops_and_keeps_the_last_accepted_epoch(
+    kernel_run, monkeypatch: pytest.MonkeyPatch
+):
+    config, _, _ = kernel_run
+    config.epochs = 3
+    config.max_rollbacks = 2
+    _blow_up_value_loss(monkeypatch, set(range(2, 100)))
+    with pytest.raises(RuntimeError, match="diverged at epoch 1 after 2 rollbacks"):
+        train_with_kernels(config)
+    assert torch.load(config.output_dir / "last.pt", weights_only=False)["epoch"] == 0
+
+
+def test_divergence_guard_can_be_disabled(kernel_run, monkeypatch: pytest.MonkeyPatch):
+    config, _, _ = kernel_run
+    config.epochs = 2
+    config.divergence_factor = 0
+    _blow_up_value_loss(monkeypatch, {2, 3})
+    train_with_kernels(config)
+    history = json.loads((config.output_dir / "history.json").read_text())["epochs"]
+    assert history[-1]["value_loss"] > 1e3 * history[1]["value_loss"]
+    assert history[-1]["rollbacks"] == 0
+
+
+@pytest.mark.parametrize("factor", [0.5, 1.0, float("inf"), -1.0])
+def test_divergence_factor_must_be_off_or_above_one(factor):
+    with pytest.raises(ValueError, match="divergence_factor"):
+        KernelTrainingConfig(
+            base_checkpoint=Path("b"), dataset_dir=Path("d"), kernel_dir=Path("k"),
+            output_dir=Path("o"), cache_dir=Path("c"), divergence_factor=factor,
+        )

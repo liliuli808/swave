@@ -81,11 +81,22 @@ class KernelTrainingConfig:
     # <1 trains kernels on a fixed subset of kernel-labelled models (data-scaling
     # tests); value rows and validation are unchanged.
     kernel_train_fraction: float = 1.0
+    # An epoch whose training loss exceeds this multiple of the lowest of the
+    # last 10 accepted epochs is discarded and retried from last.pt with new
+    # batches; 0 disables the guard.
+    divergence_factor: float = 50.0
+    max_rollbacks: int = 3
 
     def __post_init__(self) -> None:
         if not (math.isfinite(self.kernel_train_fraction)
                 and 0 < self.kernel_train_fraction <= 1):
             raise ValueError("kernel_train_fraction must be in (0, 1]")
+        if not math.isfinite(self.divergence_factor) or not (
+            self.divergence_factor == 0 or self.divergence_factor > 1
+        ):
+            raise ValueError("divergence_factor must be 0 (off) or greater than 1")
+        if self.max_rollbacks < 0:
+            raise ValueError("max_rollbacks must be nonnegative")
         if not math.isfinite(self.max_grad_norm) or self.max_grad_norm <= 0:
             raise ValueError("max_grad_norm must be finite and positive")
         if (not math.isfinite(self.max_initial_score)
@@ -281,20 +292,27 @@ def load_kernel_rows(
     return rows
 
 
-def select_kernel_fraction(
-    rows: dict[str, NDArray], fraction: float, seed: int
-) -> dict[str, NDArray]:
-    """Keep a seeded fraction of models, chosen by sample ID.
+def kernel_fraction_mask(sample_ids: NDArray, fraction: float, seed: int) -> NDArray:
+    """Mark a seeded fraction of models, chosen by sample ID.
 
     The choice is a prefix of one permutation of the sorted IDs, so it does not
     depend on shard read order and smaller fractions are nested in larger ones.
     """
-    if fraction >= 1:
-        return rows
-    ids = np.asarray(rows["sample_id"])
+    ids = np.asarray(sample_ids)
+    mask = np.zeros(len(ids), dtype=bool)
     order = np.argsort(ids, kind="stable")
     keep = order[np.random.default_rng(seed).permutation(len(ids))]
-    keep = np.sort(keep[:max(1, round(fraction * len(ids)))])
+    mask[keep[:max(1, round(fraction * len(ids)))]] = True
+    return mask
+
+
+def select_kernel_fraction(
+    rows: dict[str, NDArray], fraction: float, seed: int
+) -> dict[str, NDArray]:
+    """Keep the models chosen by :func:`kernel_fraction_mask`, in input order."""
+    if fraction >= 1:
+        return rows
+    keep = np.flatnonzero(kernel_fraction_mask(rows["sample_id"], fraction, seed))
     return {key: value[keep] for key, value in rows.items()}
 
 
@@ -725,6 +743,11 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
         _save(best_path, payload)
         retain_kernel_checkpoint(payload)
 
+    recent_losses = [
+        record["value_loss"] + record["kernel_loss"]
+        for record in history if record["epoch"] >= 0 and "value_loss" in record
+    ][-10:]
+    rollbacks = 0
     # Per-sample hard-example weights from the latest relative error.
     sample_weight = torch.ones(len(train_vs), device=device)
     kernel_weight = torch.ones(len(kernel_vs), device=device)
@@ -732,7 +755,8 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
     # Mining must not perturb either of the baseline batch RNG streams.
     mining_rng = np.random.default_rng(config.seed + 104729 + start_epoch)
     row_rng = np.random.default_rng(config.seed + 130363 + start_epoch)
-    for epoch in range(start_epoch, config.epochs):
+    epoch = start_epoch
+    while epoch < config.epochs:
         if config.kernel_row_weight > 0 and (
             row_bank is None or epoch % config.kernel_mining_interval == 0
         ):
@@ -839,6 +863,31 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
                     sample_weight[index] = (
                         1.0 + relative / 2e-3
                     ) ** config.hard_example_power
+        epoch_loss = (value_total + kernel_total) / steps_per_epoch
+        if (config.divergence_factor > 0 and recent_losses
+                and epoch_loss > config.divergence_factor * min(recent_losses)):
+            rollbacks += 1
+            print(json.dumps({"divergence_rollback": {
+                "epoch": epoch, "training_loss": epoch_loss,
+                "reference_loss": min(recent_losses), "rollback": rollbacks,
+                "grad_norm_max": grad_norm_max,
+            }}), flush=True)
+            if rollbacks > config.max_rollbacks:
+                raise RuntimeError(
+                    f"training diverged at epoch {epoch} after {config.max_rollbacks} "
+                    f"rollbacks; {last_path} holds the last accepted epoch"
+                )
+            payload = torch.load(last_path, map_location="cpu", weights_only=False)
+            model.load_state_dict(payload["model"])
+            optimizer.load_state_dict(payload["optimizer"])
+            scheduler.load_state_dict(payload["scheduler"])
+            del payload
+            # Hard-example weights were updated by the discarded epoch.
+            sample_weight.fill_(1.0)
+            kernel_weight.fill_(1.0)
+            rng = np.random.default_rng(config.seed + epoch + 1_000_003 * rollbacks)
+            continue
+        recent_losses = (recent_losses + [epoch_loss])[-10:]
         model.eval()
         metrics = evaluate_rows(forward, validation_rows)
         score = _selection_score(metrics)
@@ -852,6 +901,7 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
             "grad_clip_fraction": clipped_steps / steps_per_epoch,
             "seconds": time.time() - started,
             "score": score,
+            "rollbacks": rollbacks,
             "validation": metrics,
         }
         if config.kernel_row_weight > 0:
@@ -889,6 +939,7 @@ def train_with_kernels(config: KernelTrainingConfig) -> Path:
             ),
             flush=True,
         )
+        epoch += 1
     if best_kernel_path.exists():
         return best_kernel_path
     return best_path if best_path.exists() else last_path
