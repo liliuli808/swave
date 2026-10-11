@@ -847,6 +847,67 @@ LVL/coupled validation rates with kw3-fixed (95.76% / 97.33%). Also compare
 the validation history by epoch: an early lead for the full run that keeps
 widening is the data-limited signature.
 
+### 2026-10-11 result: doubling kernel data gains 0.19 points
+
+**Divergence and resume.** The first 50% run (`runs/kernel-wide-kw3-fixed-half`)
+diverged at epoch 205. In one epoch, maximum gradient norm went from 2.6e3 to
+5.1e8 and value loss from 5 to 1.1e4. Curves never recovered: at epoch 499 the
+run has 0.2% curves and 89% kernels. Its epoch-198 checkpoint (with optimizer and
+scheduler state) was copied to `runs/kernel-wide-kw3-fixed-half-r199` as
+`last.pt` and resumed with the same settings. Only the batch order differs.
+The resumed run stayed stable (maximum value loss 26) to epoch 499. Commit
+`7eb8042` now does such a rollback automatically (`divergence_factor`,
+`max_rollbacks`).
+
+Validation `kernel_rows_within_5pct` by epoch:
+
+| epoch | 50% (r199) | 100% (kw3-fixed) |
+| ---: | ---: | ---: |
+| 249 | 0.9705 | 0.9713 |
+| 349 | 0.9754 | 0.9774 |
+| 449 | 0.9780 | 0.9799 |
+| 499 | 0.9782 | 0.9801 |
+
+Test acceptance (`best-kernel.pt`, epoch 496): curves 99.872%, kernels 97.941%,
+max rel 4.71% (100% run: 99.846%, 98.116%, 3.64%).
+
+Diagnostics by kind and mode, rows within 5%. For the 50% run, the train
+split is separated into the 100,000 models it trained on (seen) and the
+100,000 it did not (unseen):
+
+| | 50% seen | 50% unseen | 50% validation | 100% train | 100% validation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all | 99.95% | 97.85% | 97.82% | 99.64% | 98.01% |
+| normal | 100.00% | 99.98% | 99.97% | 99.99% | 99.97% |
+| LVL | 99.94% | 95.50% | 95.51% | 99.39% | 95.76% |
+| HVL | 99.99% | 99.93% | 99.93% | 99.96% | 99.91% |
+| coupled | 99.93% | 97.08% | 97.03% | 99.47% | 97.33% |
+| M3 | 99.85% | 95.89% | 95.83% | 98.95% | 96.03% |
+| rows >=20% | 0.000% | 0.873% | 0.886% | 0.002% | 0.725% |
+
+Conclusions:
+
+* Unseen training models and validation agree to 0.03 points in every group,
+  so validation is a faithful held-out estimate with no split shift. The gap
+  is pure generalization.
+* The network nearly memorizes whatever it is shown (99.95% on seen models).
+* Doubling the kernel models from 100,000 to 200,000 cuts validation
+  failures only from 2.18% to 1.99% (×0.91). LVL gains 0.25 points and coupled
+  0.30. With two points, a power-law extrapolation is rough. At this rate,
+  reaching 1% failures would take about 7–8 more doublings (~30 M kernel
+  models), so **more labelled data alone is not a practical route to 99%**.
+
+Next, change how the network generalizes on LVL/coupled models rather than
+how much it sees:
+
+1. Regularization on the kw3-fixed recipe: `--weight-decay` (currently 0),
+   e.g. 1e-4 and 1e-3, comparing validation LVL/coupled rates and the seen/
+   train gap.
+2. Retest profile-feature conditioning (`PROFILE_FEATURES=1`) with corrected
+   gradients. Its earlier result (above) was trained with the LayerNorm
+   defect, like every other plateau run, so it is not evidence against the
+   representation.
+
 ### Earlier tuning knobs (historical; validate corrected gradients first)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.
