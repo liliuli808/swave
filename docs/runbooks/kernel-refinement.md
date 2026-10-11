@@ -918,6 +918,48 @@ how much it sees:
    defect, like every other plateau run, so it is not evidence against the
    representation.
 
+### 2026-10-11 result: weight decay 0.01 and profile features do not move validation
+
+Both runs used the kw3-fixed recipe from scratch (512×6, 500 epochs, lr 1e-3),
+with one change each: `WEIGHT_DECAY=0.01` on GPU 1
+(`runs/kernel-wide-kw3-fixed-wd1e-2`) and `PROFILE_FEATURES=1` on GPU 0
+(`runs/kernel-wide-pf-fixed`). Both ran with the rollback guard, which caught
+three divergences: wd at epoch 163 (loss 16,516 vs 22, gradient 5e9), and pf at
+epochs 166 (425,000 vs 23, 4e11) and 239 (78,000 vs 10, 1e10). Each was retried
+with new batches and training continued normally. Divergence is therefore a
+recurring property of this recipe at lr 1e-3, not a one-off.
+
+Test acceptance (`best-kernel.pt`):
+
+| run | epoch | curves<=1% | max rel | kernel<=5% | kernel med |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| kw3-fixed | 493 | 99.846% | 3.64% | 98.116% | 0.141% |
+| wd 0.01 | 496 | 99.864% | 4.02% | 98.139% | 0.111% |
+| profile features | 499 | 99.868% | 3.00% | 98.010% | 0.161% |
+
+Rows within 5%, train / validation:
+
+| | kw3-fixed | wd 0.01 | profile features |
+| --- | --- | --- | --- |
+| all | 99.64 / 98.01 | 99.77 / 98.02 | 99.77 / 97.88 |
+| LVL | 99.39 / 95.76 | 99.64 / 95.81 | 99.62 / 95.55 |
+| coupled | 99.47 / 97.33 | 99.66 / 97.33 | 99.66 / 97.14 |
+| M3 | 98.95 / 96.03 | 99.32 / 96.12 | 99.33 / 95.87 |
+| validation rows >=20% | 34,709 | 37,152 | 38,954 |
+
+Neither change narrows the gap. Weight decay 0.01 is within noise of
+kw3-fixed on validation (+0.01 points) and test (+0.02). Profile features are
+slightly worse (−0.13 validation, −0.11 test). Both fit training rows *better*,
+and both have more severe validation errors. Under AdamW the cumulative shrink
+from wd 0.01 over this schedule is only about exp(−Σ lr·wd) ≈ 0.6, so it is a
+weak regularizer, but it does not point in the right direction.
+
+Taken together, the validation kernel rate is now ~98.0% for every 512×6
+recipe with correct gradients: wider fit, row objective, weight decay,
+profile features, and twice the data (+0.19). The remaining failures are
+concentrated in LVL/coupled models, which the network memorizes on training
+but does not generalize to.
+
 ### Earlier tuning knobs (historical; validate corrected gradients first)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.
