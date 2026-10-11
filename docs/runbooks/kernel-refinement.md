@@ -900,9 +900,19 @@ Conclusions:
 Next, change how the network generalizes on LVL/coupled models rather than
 how much it sees:
 
-1. Regularization on the kw3-fixed recipe: `--weight-decay` (currently 0),
-   e.g. 1e-4 and 1e-3, comparing validation LVL/coupled rates and the seen/
-   train gap.
+1. Regularization on the kw3-fixed recipe: `WEIGHT_DECAY` (currently 0).
+   The optimizer is AdamW, so the per-step shrink is learning rate × decay:
+   at the recipe's 1e-3, values like 1e-4 would shrink weights by only
+   1e-7 per step and change nothing. Start at 0.01 and 0.1, comparing
+   validation LVL/coupled rates and the train/validation gap:
+
+   ```bash
+   CUDA_VISIBLE_DEVICES=1 PYTHON=.venv/bin/python \
+   OUTPUT_DIR=runs/kernel-wide-kw3-fixed-wd1e-2 RESULTS_DIR=results/forward-kernel-wide-kw3-fixed-wd1e-2 \
+   WIDTH=512 BLOCKS=6 EPOCHS=500 LEARNING_RATE=1e-3 WARMUP_STEPS=2000 \
+   KERNEL_WEIGHT=3 KERNEL_HARD_POWER=1 WEIGHT_DECAY=0.01 \
+   setsid nohup bash scripts/run_kernel_refinement.sh > kernel-wide-kw3-fixed-wd1e-2.out 2>&1 < /dev/null &
+   ```
 2. Retest profile-feature conditioning (`PROFILE_FEATURES=1`) with corrected
    gradients. Its earlier result (above) was trained with the LayerNorm
    defect, like every other plateau run, so it is not evidence against the
