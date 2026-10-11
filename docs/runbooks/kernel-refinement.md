@@ -960,6 +960,47 @@ profile features, and twice the data (+0.19). The remaining failures are
 concentrated in LVL/coupled models, which the network memorizes on training
 but does not generalize to.
 
+### Ensemble check: about one third of the failures are model variance
+
+`scripts/ensemble_kernel_check.py` averages the members' Jacobians (exactly the
+kernel of the averaged network) and curve predictions, and counts how many
+members fail each row. Validation, the three corrected-gradient
+`best-kernel.pt` checkpoints (kw3-fixed, wd 0.01, profile features):
+
+```bash
+PYTHONPATH=src python scripts/ensemble_kernel_check.py \
+  --checkpoint runs/kernel-wide-kw3-fixed/best-kernel.pt \
+  --checkpoint runs/kernel-wide-kw3-fixed-wd1e-2/best-kernel.pt \
+  --checkpoint runs/kernel-wide-pf-fixed/best-kernel.pt \
+  --device cuda --output results/kernel-ensemble/validation.json
+```
+
+| rows within 5% | kw3-fixed | wd 0.01 | profile features | ensemble |
+| --- | ---: | ---: | ---: | ---: |
+| all | 98.01% | 98.02% | 97.88% | **98.37%** |
+| LVL | 95.76% | 95.81% | 95.55% | 96.58% |
+| coupled | 97.33% | 97.33% | 97.14% | 97.80% |
+| M3 | 96.03% | 96.12% | 95.87% | 96.87% |
+| curves <=1% | 99.84% | 99.84% | 99.87% | 99.91% |
+
+Of the 4,788,089 valid rows, 41,510 fail in one member, 32,267 in two and
+**61,954 in all three** (1.29% of rows; 46% of the 135,731 rows any member
+fails). The ensemble gains 0.36 points, the largest gain from any change so
+far, and most of it comes from LVL (+0.77) and coupled (+0.47) models. So part of
+the gap is variance between trained models.
+
+The shared failures set the limit. Even if averaging fixed every row that
+not all members fail, validation would reach about 98.71%. Adding similar
+members therefore cannot reach 99% on its own. Two follow-ups, in order:
+
+1. Characterize the 61,954 rows that all three members fail (kind, mode,
+   frequency, kernel norm and sharpness, proximity to mode cut-off or
+   osculation). Rows this different recipes all miss are where a targeted
+   change (representation, validity mask, or dedicated weighting) has to act.
+2. If an ensemble is acceptable for inversion (it multiplies forward and
+   Jacobian cost by the member count), measure 5 members of the best recipe
+   to see how much of the variance remains.
+
 ### Earlier tuning knobs (historical; validate corrected gradients first)
 
 1. Kernel target missed, values fine: `KERNEL_WEIGHT=3`.
